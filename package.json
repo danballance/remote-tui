@@ -1,0 +1,14 @@
+{
+  "name": "remote-deck",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.18.0",
+  "scripts": {
+    "dev:agent": "pnpm --filter @remote-deck/agent dev",
+    "dev:mobile": "pnpm --filter @remote-deck/mobile start",
+    "lint": "pnpm --recursive --if-present lint",
+    "typecheck": "pnpm --recursive --if-present typecheck",
+    "expo:doctor": "pnpm --filter @remote-deck/mobile exec expo-doctor",
+    "check": "pnpm lint && pnpm typecheck && pnpm expo:doctor"
+  }
+}

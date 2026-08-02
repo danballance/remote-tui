@@ -1,0 +1,18 @@
+{
+  "expo": {
+    "name": "Remote Deck",
+    "slug": "remote-deck",
+    "version": "0.1.0",
+    "orientation": "landscape",
+    "scheme": "remote-deck",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "plugins": ["expo-router"],
+    "android": {
+      "package": "dev.remotedeck.mobile"
+    },
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}

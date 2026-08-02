@@ -1,0 +1,9 @@
+packages:
+  - apps/*
+
+nodeLinker: hoisted
+storeDir: .pnpm-store
+
+allowBuilds:
+  esbuild: true
+  unrs-resolver: true

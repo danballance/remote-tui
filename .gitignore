@@ -1,0 +1,23 @@
+node_modules/
+.pnpm-store/
+
+# Environment-specific configuration
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Expo
+.expo/
+apps/mobile/.expo/
+apps/mobile/dist/
+apps/mobile/web-build/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/
