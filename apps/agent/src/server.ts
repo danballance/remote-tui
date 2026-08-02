@@ -8,20 +8,31 @@ const AGENT_PORT = 43_820;
 const REPOSITORY = "/home/anoni/Code/fullstack/remote-tui";
 const SESSION = "remote-deck";
 const TARGET = `${SESSION}:lazygit.0`;
-const TERMINAL_COLUMNS = 80;
-const TERMINAL_ROWS = 20;
+const TERMINAL_COLUMNS = 120;
+const TERMINAL_ROWS = 35;
+const TERMINAL_METADATA_FORMAT =
+  "#{pane_width}\t#{pane_height}\t#{cursor_x}\t#{cursor_y}\t#{cursor_flag}";
 
 const execFileAsync = promisify(execFile);
 const app = Fastify({ logger: true });
 
-interface Snapshot {
+interface TerminalFrame {
   running: boolean;
-  lines: string[];
+  columns: number;
+  rows: number;
+  ansi: string;
+  cursorX: number;
+  cursorY: number;
+  cursorVisible: boolean;
 }
 
 interface ViewDefinition {
-  snapshot(): Promise<Snapshot>;
+  snapshot(): Promise<TerminalFrame>;
   actions: Record<string, () => Promise<void>>;
+}
+
+interface TmuxOptions {
+  logResponse?: boolean;
 }
 
 function commandResponse(error: unknown): { stdout: unknown; stderr: unknown } {
@@ -35,22 +46,33 @@ function commandResponse(error: unknown): { stdout: unknown; stderr: unknown } {
   };
 }
 
-async function tmux(...args: string[]): Promise<string> {
+async function runTmux(args: string[], options: TmuxOptions = {}): Promise<string> {
   // `execFile` invokes tmux directly, so each item remains a distinct argument rather than being
   // interpolated by a shell. The same array is logged to show the exact command being executed.
   const command = ["tmux", ...args];
+  const logResponse = options.logResponse ?? true;
 
   try {
     const { stdout, stderr } = await execFileAsync("tmux", args, { encoding: "utf8" });
-    app.log.info({ command, response: { stdout, stderr } }, "tmux command completed");
+    const response = logResponse ? { stdout, stderr } : { stderr };
+    app.log.info({ command, response }, "tmux command completed");
     return stdout;
   } catch (error) {
+    const response = commandResponse(error);
     app.log.error(
-      { err: error, command, response: commandResponse(error) },
+      {
+        ...(logResponse && { err: error }),
+        command,
+        response: logResponse ? response : { stderr: response.stderr },
+      },
       "tmux command failed",
     );
     throw error;
   }
+}
+
+async function tmux(...args: string[]): Promise<string> {
+  return await runTmux(args);
 }
 
 async function sessionExists(): Promise<boolean> {
@@ -94,16 +116,46 @@ async function openOrRestartLazygit(): Promise<void> {
   );
 }
 
-async function lazygitSnapshot(): Promise<Snapshot> {
+async function lazygitSnapshot(): Promise<TerminalFrame> {
   if (!(await sessionExists())) {
-    return { running: false, lines: [] };
+    return {
+      running: false,
+      columns: TERMINAL_COLUMNS,
+      rows: TERMINAL_ROWS,
+      ansi: "",
+      cursorX: 0,
+      cursorY: 0,
+      cursorVisible: false,
+    };
   }
 
-  // `capture-pane` reads the visible pane; `-p` prints it to stdout and `-t` selects the pane.
-  const output = await tmux("capture-pane", "-p", "-t", TARGET);
+  // `-e` retains terminal attributes and `-N` preserves trailing spaces in the captured grid.
+  // The frame body is deliberately omitted from logs because it contains the terminal contents.
+  const ansi = await runTmux(["capture-pane", "-p", "-e", "-N", "-t", TARGET], {
+    logResponse: false,
+  });
+  const metadata = await tmux(
+    "display-message",
+    "-p",
+    "-t",
+    TARGET,
+    TERMINAL_METADATA_FORMAT,
+  );
+  const metadataFields = metadata.trimEnd().split("\t");
+  const columns = Number(metadataFields[0]);
+  const rows = Number(metadataFields[1]);
+  const cursorX = Number(metadataFields[2]);
+  const cursorY = Number(metadataFields[3]);
+  const cursorFlag = Number(metadataFields[4]);
+
   return {
     running: true,
-    lines: output.replace(/\n$/, "").split("\n"),
+    columns,
+    rows,
+    ansi: ansi.replace(/\n$/, ""),
+    cursorX,
+    cursorY,
+    cursorVisible: cursorFlag === 1,
   };
 }
 

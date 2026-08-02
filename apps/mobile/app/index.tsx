@@ -1,7 +1,16 @@
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useState } from "react";
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import {
+  ActivityIndicator,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+
+import TerminalView, { type TerminalFrame } from "../components/TerminalView";
 
 const AGENT_URL = "http://192.168.86.75:43820";
 const VIEW: DeckView = "lazygit";
@@ -9,11 +18,6 @@ const REFRESH_DELAY_MS = 100;
 
 type DeckView = "lazygit";
 type Action = "open" | "up" | "down";
-
-interface Snapshot {
-  running: boolean;
-  lines: string[];
-}
 
 const actionFeedback: Record<Action, string> = {
   open: "LazyGit opened",
@@ -29,9 +33,9 @@ async function request(path: string, init?: RequestInit): Promise<Response> {
   return response;
 }
 
-async function getSnapshot(view: DeckView): Promise<Snapshot> {
+async function getSnapshot(view: DeckView): Promise<TerminalFrame> {
   const response = await request(`/views/${view}/snapshot`);
-  return (await response.json()) as Snapshot;
+  return (await response.json()) as TerminalFrame;
 }
 
 async function runRemoteAction(view: DeckView, action: Action): Promise<void> {
@@ -43,7 +47,9 @@ function delay(milliseconds: number): Promise<void> {
 }
 
 function messageFrom(error: unknown): string {
-  return error instanceof Error ? error.message : "An unexpected error occurred.";
+  return error instanceof Error
+    ? error.message
+    : "An unexpected error occurred.";
 }
 
 interface DeckButtonProps {
@@ -54,7 +60,13 @@ interface DeckButtonProps {
   onPress(): void;
 }
 
-function DeckButton({ label, accessibilityHint, busy, disabled, onPress }: DeckButtonProps) {
+function DeckButton({
+  label,
+  accessibilityHint,
+  busy,
+  disabled,
+  onPress,
+}: DeckButtonProps) {
   return (
     <Pressable
       accessibilityHint={accessibilityHint}
@@ -69,21 +81,27 @@ function DeckButton({ label, accessibilityHint, busy, disabled, onPress }: DeckB
         pressed && !disabled && styles.buttonPressed,
       ]}
     >
-      {busy ? <ActivityIndicator color="#ffffff" /> : <Text style={styles.buttonText}>{label}</Text>}
+      {busy ? (
+        <ActivityIndicator color="#ffffff" />
+      ) : (
+        <Text style={styles.buttonText}>{label}</Text>
+      )}
     </Pressable>
   );
 }
 
 export default function Index() {
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [snapshot, setSnapshot] = useState<TerminalFrame | null>(null);
   const [pendingAction, setPendingAction] = useState<Action | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    getSnapshot(VIEW).then(setSnapshot).catch((loadError: unknown) => {
-      setError(messageFrom(loadError));
-    });
+    getSnapshot(VIEW)
+      .then(setSnapshot)
+      .catch((loadError: unknown) => {
+        setError(messageFrom(loadError));
+      });
   }, []);
 
   async function runAction(action: Action): Promise<void> {
@@ -115,19 +133,18 @@ export default function Index() {
       <StatusBar style="light" />
       <View style={styles.page}>
         <View style={styles.terminal}>
-          <ScrollView nestedScrollEnabled style={styles.terminalVerticalScroll}>
-            <ScrollView horizontal>
-              <Text selectable style={styles.terminalText}>
-                {snapshot === null
-                  ? error === null
-                    ? "Loading…"
-                    : "Snapshot unavailable."
-                  : snapshot.running
-                    ? snapshot.lines.join("\n")
-                    : "LazyGit is not running."}
-              </Text>
-            </ScrollView>
-          </ScrollView>
+          {snapshot === null ? (
+            <Text style={styles.terminalMessage}>
+              {error === null ? "Loading…" : "Snapshot unavailable."}
+            </Text>
+          ) : snapshot.running ? (
+            <TerminalView
+              dom={{ scrollEnabled: true, style: styles.terminalWebView }}
+              frame={snapshot}
+            />
+          ) : (
+            <Text style={styles.terminalMessage}>LazyGit is not running.</Text>
+          )}
         </View>
 
         <ScrollView
@@ -135,10 +152,6 @@ export default function Index() {
           showsVerticalScrollIndicator={false}
           style={styles.controlRail}
         >
-          <Text accessibilityRole="header" style={styles.title}>
-            LazyGit
-          </Text>
-
           <View style={styles.messages}>
             {feedback === null ? null : (
               <Text accessibilityLiveRegion="polite" style={styles.feedback}>
@@ -195,13 +208,8 @@ const styles = StyleSheet.create({
   page: {
     flex: 1,
     flexDirection: "row",
-    gap: 16,
-    padding: 16,
-  },
-  title: {
-    color: "#f8fafc",
-    fontSize: 30,
-    fontWeight: "800",
+    gap: 8,
+    padding: 4,
   },
   terminal: {
     flex: 1,
@@ -209,26 +217,26 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     backgroundColor: "#020617",
     overflow: "hidden",
-    padding: 14,
+    padding: 4,
   },
-  terminalVerticalScroll: {
+  terminalWebView: {
     flex: 1,
+    backgroundColor: "#020617",
   },
-  terminalText: {
-    minWidth: 620,
+  terminalMessage: {
     color: "#dbeafe",
     fontFamily: "monospace",
     fontSize: 12,
     lineHeight: 17,
   },
   controlRail: {
-    width: "28%",
-    minWidth: 200,
-    maxWidth: 280,
+    width: "18%",
+    minWidth: 125,
+    maxWidth: 200,
   },
   controlRailContent: {
     flexGrow: 1,
-    gap: 16,
+    gap: 8,
   },
   messages: {
     gap: 8,
@@ -244,23 +252,23 @@ const styles = StyleSheet.create({
     lineHeight: 21,
   },
   controls: {
-    gap: 12,
+    gap: 8,
     marginTop: "auto",
   },
   navigationRow: {
     flexDirection: "row",
-    gap: 12,
+    gap: 8,
   },
   navigationButton: {
     flex: 1,
   },
   button: {
-    minHeight: 72,
+    minHeight: 48,
     alignItems: "center",
     justifyContent: "center",
-    borderRadius: 12,
+    borderRadius: 10,
     backgroundColor: "#0369a1",
-    paddingHorizontal: 20,
+    paddingHorizontal: 4,
   },
   buttonDisabled: {
     backgroundColor: "#334155",
@@ -271,7 +279,7 @@ const styles = StyleSheet.create({
   },
   buttonText: {
     color: "#ffffff",
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: "800",
   },
 });
