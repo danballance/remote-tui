@@ -5,7 +5,7 @@
   "main": "expo-router/entry",
   "scripts": {
     "start": "expo start --lan",
-    "lint": "eslint app components",
+    "lint": "eslint app components lib",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

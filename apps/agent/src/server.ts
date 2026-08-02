@@ -1,21 +1,45 @@
+/**
+ * Remote Deck's desktop agent.
+ *
+ * The HTTP API exposes persisted projects and an allow-listed application
+ * catalog. Each project maps to one tmux session and each application maps to a
+ * single named window whose primary pane is captured and controlled remotely.
+ */
+
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import Fastify from "fastify";
 
+import {
+  createJsonProjectRepository,
+  type Project,
+  type ProjectRepository,
+} from "./projects.js";
+
 const AGENT_HOST = "192.168.86.75";
 const AGENT_PORT = 43_820;
-const REPOSITORY = "/home/anoni/Code/fullstack/remote-tui";
-const SESSION = "remote-deck";
-const TARGET = `${SESSION}:lazygit.0`;
+/** Set to `debug` when tmux probes and snapshot metadata are needed. */
+const AGENT_LOG_LEVEL = process.env.REMOTE_DECK_LOG_LEVEL ?? "info";
+const PROJECT_STORE_PATH = fileURLToPath(
+  new URL("../.data/projects.json", import.meta.url),
+);
+const SESSION_PREFIX = "remote-deck-";
 const TERMINAL_COLUMNS = 120;
 const TERMINAL_ROWS = 35;
 const TERMINAL_METADATA_FORMAT =
   "#{pane_width}\t#{pane_height}\t#{cursor_x}\t#{cursor_y}\t#{cursor_flag}";
 
-const execFileAsync = promisify(execFile);
-const app = Fastify({ logger: true });
+/** A server-owned application that clients may launch but may not reconfigure. */
+interface AppDefinition {
+  id: string;
+  title: string;
+  command: string;
+}
 
+/** Complete terminal grid and cursor state returned to the mobile renderer. */
 interface TerminalFrame {
   running: boolean;
   columns: number;
@@ -26,15 +50,29 @@ interface TerminalFrame {
   cursorVisible: boolean;
 }
 
-interface ViewDefinition {
-  snapshot(): Promise<TerminalFrame>;
-  actions: Record<string, () => Promise<void>>;
-}
-
+/** Controls how a tmux subprocess is represented in structured logs. */
 interface TmuxOptions {
+  logFailureAsDebug?: boolean;
   logResponse?: boolean;
 }
 
+/** Fixed application catalog; commands are never accepted from an HTTP client. */
+const APP_DEFINITIONS: readonly AppDefinition[] = [
+  { id: "lazygit", title: "LazyGit", command: "exec lazygit" },
+  { id: "yazi", title: "Yazi", command: "exec yazi" },
+  { id: "pi", title: "Pi", command: "exec pi" },
+];
+
+/** Public action names mapped to the exact tmux key names they emit. */
+const ACTION_KEYS: Readonly<Record<string, string>> = {
+  up: "Up",
+  down: "Down",
+};
+
+const execFileAsync = promisify(execFile);
+const app = Fastify({ logger: { level: AGENT_LOG_LEVEL } });
+
+/** Extracts child-process output from an unknown error for safe structured logging. */
 function commandResponse(error: unknown): { stdout: unknown; stderr: unknown } {
   if (typeof error !== "object" || error === null) {
     return { stdout: undefined, stderr: undefined };
@@ -46,161 +84,418 @@ function commandResponse(error: unknown): { stdout: unknown; stderr: unknown } {
   };
 }
 
+/**
+ * Runs tmux without a shell and logs the exact argument vector.
+ *
+ * Terminal captures opt out of response logging so terminal contents never
+ * enter logs. Expected probe failures can be demoted to debug level.
+ */
 async function runTmux(args: string[], options: TmuxOptions = {}): Promise<string> {
-  // `execFile` invokes tmux directly, so each item remains a distinct argument rather than being
-  // interpolated by a shell. The same array is logged to show the exact command being executed.
   const command = ["tmux", ...args];
   const logResponse = options.logResponse ?? true;
 
   try {
     const { stdout, stderr } = await execFileAsync("tmux", args, { encoding: "utf8" });
     const response = logResponse ? { stdout, stderr } : { stderr };
-    app.log.info({ command, response }, "tmux command completed");
+    app.log.debug({ command, response }, "tmux command completed");
     return stdout;
   } catch (error) {
     const response = commandResponse(error);
-    app.log.error(
-      {
-        ...(logResponse && { err: error }),
-        command,
-        response: logResponse ? response : { stderr: response.stderr },
-      },
-      "tmux command failed",
-    );
+    const context = {
+      ...(logResponse && !options.logFailureAsDebug && { err: error }),
+      command,
+      response: logResponse ? response : { stderr: response.stderr },
+    };
+
+    if (options.logFailureAsDebug === true) {
+      app.log.debug(context, "tmux probe did not find its target");
+    } else {
+      app.log.error(context, "tmux command failed");
+    }
     throw error;
   }
 }
 
+/** Convenience wrapper for tmux commands whose failures are operational errors. */
 async function tmux(...args: string[]): Promise<string> {
   return await runTmux(args);
 }
 
-async function sessionExists(): Promise<boolean> {
+/** Derives the private tmux session name owned by a project. */
+function sessionName(project: Project): string {
+  return `${SESSION_PREFIX}${project.id}`;
+}
+
+/** Targets the single primary pane in an application's named tmux window. */
+function paneTarget(project: Project, application: AppDefinition): string {
+  return `${sessionName(project)}:${application.id}.0`;
+}
+
+/** Checks whether the project's lazily created tmux session currently exists. */
+async function sessionExists(project: Project): Promise<boolean> {
+  const session = sessionName(project);
   try {
-    // `has-session` succeeds when the session exists; `-t` names the target session to inspect.
-    await tmux("has-session", "-t", SESSION);
+    await runTmux(["has-session", "-t", session], {
+      logFailureAsDebug: true,
+      logResponse: false,
+    });
+    app.log.debug({ projectId: project.id, session, exists: true }, "tmux session checked");
     return true;
   } catch {
+    app.log.debug({ projectId: project.id, session, exists: false }, "tmux session checked");
     return false;
   }
 }
 
-async function openOrRestartLazygit(): Promise<void> {
-  if (await sessionExists()) {
-    // `kill-session` removes the existing session; `-t` selects the session to remove.
-    await tmux("kill-session", "-t", SESSION);
+/** Checks exact window names to avoid tmux falling back to the current window. */
+async function appWindowExists(
+  project: Project,
+  application: AppDefinition,
+): Promise<boolean> {
+  if (!(await sessionExists(project))) {
+    app.log.debug(
+      { projectId: project.id, appId: application.id, exists: false },
+      "app window checked without a project session",
+    );
+    return false;
+  }
+
+  const windowNames = await tmux(
+    "list-windows",
+    "-t",
+    sessionName(project),
+    "-F",
+    "#{window_name}",
+  );
+  const exists = windowNames.trimEnd().split("\n").includes(application.id);
+  app.log.debug(
+    { projectId: project.id, appId: application.id, exists },
+    "app window checked",
+  );
+  return exists;
+}
+
+/**
+ * Ensures one persistent window exists for an application.
+ *
+ * The first application creates the session and its first window. Later
+ * applications create sibling windows; an existing window is reused unchanged.
+ */
+async function ensureAppWindow(
+  project: Project,
+  application: AppDefinition,
+): Promise<void> {
+  if (await appWindowExists(project, application)) {
+    app.log.info(
+      {
+        projectId: project.id,
+        appId: application.id,
+        session: sessionName(project),
+        target: paneTarget(project, application),
+      },
+      "reusing existing app window",
+    );
+    return;
+  }
+
+  const projectSession = sessionName(project);
+  if (!(await sessionExists(project))) {
+    await tmux(
+      "new-session",
+      "-d",
+      "-x",
+      String(TERMINAL_COLUMNS),
+      "-y",
+      String(TERMINAL_ROWS),
+      "-s",
+      projectSession,
+      "-n",
+      application.id,
+      "-c",
+      project.directory,
+      application.command,
+    );
+    app.log.info(
+      {
+        projectId: project.id,
+        appId: application.id,
+        directory: project.directory,
+        session: projectSession,
+        target: paneTarget(project, application),
+      },
+      "created project session with its first app window",
+    );
+    return;
   }
 
   await tmux(
-    // `new-session` creates the tmux session that owns the LazyGit terminal.
-    "new-session",
-    // `-d` starts it detached because the mobile client only captures and controls the pane.
+    "new-window",
     "-d",
-    // `-x` sets the landscape terminal grid width in columns.
-    "-x",
-    String(TERMINAL_COLUMNS),
-    // `-y` sets the landscape terminal grid height in rows.
-    "-y",
-    String(TERMINAL_ROWS),
-    // `-s` assigns the session name used by later tmux commands.
-    "-s",
-    SESSION,
-    // `-n` names the first window, which is also part of TARGET.
+    "-t",
+    projectSession,
     "-n",
-    "lazygit",
-    // `-c` sets the working directory before starting the window command.
+    application.id,
     "-c",
-    REPOSITORY,
-    // The final argument is the window command. `exec` makes LazyGit the pane's main process.
-    "exec lazygit",
+    project.directory,
+    application.command,
+  );
+  app.log.info(
+    {
+      projectId: project.id,
+      appId: application.id,
+      directory: project.directory,
+      session: projectSession,
+      target: paneTarget(project, application),
+    },
+    "created app window in existing project session",
   );
 }
 
-async function lazygitSnapshot(): Promise<TerminalFrame> {
-  if (!(await sessionExists())) {
-    return {
-      running: false,
-      columns: TERMINAL_COLUMNS,
-      rows: TERMINAL_ROWS,
-      ansi: "",
-      cursorX: 0,
-      cursorY: 0,
-      cursorVisible: false,
-    };
+/** Returns the stable empty frame used when an app window is not running. */
+function stoppedFrame(): TerminalFrame {
+  return {
+    running: false,
+    columns: TERMINAL_COLUMNS,
+    rows: TERMINAL_ROWS,
+    ansi: "",
+    cursorX: 0,
+    cursorY: 0,
+    cursorVisible: false,
+  };
+}
+
+/** Captures one app pane without ever writing its terminal contents to logs. */
+async function captureApp(
+  project: Project,
+  application: AppDefinition,
+): Promise<TerminalFrame> {
+  if (!(await appWindowExists(project, application))) {
+    app.log.debug(
+      { projectId: project.id, appId: application.id, running: false },
+      "terminal snapshot requested for a stopped app",
+    );
+    return stoppedFrame();
   }
 
-  // `-e` retains terminal attributes and `-N` preserves trailing spaces in the captured grid.
-  // The frame body is deliberately omitted from logs because it contains the terminal contents.
-  const ansi = await runTmux(["capture-pane", "-p", "-e", "-N", "-t", TARGET], {
+  const target = paneTarget(project, application);
+  const ansi = await runTmux(["capture-pane", "-p", "-e", "-N", "-t", target], {
     logResponse: false,
   });
   const metadata = await tmux(
     "display-message",
     "-p",
     "-t",
-    TARGET,
+    target,
     TERMINAL_METADATA_FORMAT,
   );
   const metadataFields = metadata.trimEnd().split("\t");
-  const columns = Number(metadataFields[0]);
-  const rows = Number(metadataFields[1]);
-  const cursorX = Number(metadataFields[2]);
-  const cursorY = Number(metadataFields[3]);
-  const cursorFlag = Number(metadataFields[4]);
 
-  return {
+  const frame: TerminalFrame = {
     running: true,
-    columns,
-    rows,
+    columns: Number(metadataFields[0]),
+    rows: Number(metadataFields[1]),
     ansi: ansi.replace(/\n$/, ""),
-    cursorX,
-    cursorY,
-    cursorVisible: cursorFlag === 1,
+    cursorX: Number(metadataFields[2]),
+    cursorY: Number(metadataFields[3]),
+    cursorVisible: Number(metadataFields[4]) === 1,
   };
+  app.log.debug(
+    {
+      projectId: project.id,
+      appId: application.id,
+      target,
+      columns: frame.columns,
+      rows: frame.rows,
+      cursorX: frame.cursorX,
+      cursorY: frame.cursorY,
+      cursorVisible: frame.cursorVisible,
+    },
+    "terminal snapshot captured",
+  );
+  return frame;
 }
 
-const views: Record<string, ViewDefinition> = {
-  lazygit: {
-    snapshot: lazygitSnapshot,
-    actions: {
-      open: openOrRestartLazygit,
-      up: async () => {
-        // `send-keys` injects a key; `-t` selects the pane and `Up` is tmux's Up-arrow key name.
-        await tmux("send-keys", "-t", TARGET, "Up");
-      },
-      down: async () => {
-        // `send-keys` injects a key; `-t` selects the pane and `Down` is the Down-arrow key name.
-        await tmux("send-keys", "-t", TARGET, "Down");
-      },
-    },
-  },
-};
-
-app.get<{ Params: { view: string } }>("/views/:view/snapshot", async (request, reply) => {
-  const view = views[request.params.view];
-  if (view === undefined) {
-    return await reply.code(404).send();
+/** Opens project persistence and records enough startup context to diagnose failures. */
+async function openProjectRepository(): Promise<ProjectRepository> {
+  try {
+    const repository = await createJsonProjectRepository(PROJECT_STORE_PATH);
+    const projects = await repository.listProjects();
+    app.log.info(
+      { projectStorePath: PROJECT_STORE_PATH, projectCount: projects.length },
+      "project repository opened",
+    );
+    return repository;
+  } catch (error) {
+    app.log.fatal(
+      { err: error, projectStorePath: PROJECT_STORE_PATH },
+      "failed to open project repository",
+    );
+    throw error;
   }
+}
 
-  return await view.snapshot();
+const projectRepository = await openProjectRepository();
+
+/** Resolves an allow-listed application definition from a public app ID. */
+function findApplication(appId: string): AppDefinition | undefined {
+  return APP_DEFINITIONS.find((application) => application.id === appId);
+}
+
+// Project routes expose the repository without leaking its JSON representation.
+app.get("/projects", async () => {
+  const projects = await projectRepository.listProjects();
+  app.log.debug({ projectCount: projects.length }, "projects listed");
+  return projects;
 });
 
-app.post<{ Params: { view: string; action: string } }>(
-  "/views/:view/actions/:action",
+app.get<{ Params: { projectId: string } }>(
+  "/projects/:projectId",
   async (request, reply) => {
-    const action = views[request.params.view]?.actions[request.params.action];
-    if (action === undefined) {
+    const project = await projectRepository.getProject(request.params.projectId);
+    if (project === undefined) {
+      request.log.warn({ projectId: request.params.projectId }, "project not found");
       return await reply.code(404).send();
     }
 
-    await action();
+    request.log.debug({ projectId: project.id }, "project retrieved");
+    return project;
+  },
+);
+
+app.post<{ Body: { name: string; directory: string } }>(
+  "/projects",
+  async (request, reply) => {
+    const project: Project = {
+      id: randomUUID(),
+      name: request.body.name,
+      directory: request.body.directory,
+    };
+
+    try {
+      await projectRepository.addProject(project);
+    } catch (error) {
+      request.log.error(
+        { err: error, projectId: project.id, directory: project.directory },
+        "failed to persist project",
+      );
+      throw error;
+    }
+
+    request.log.info(
+      { projectId: project.id, name: project.name, directory: project.directory },
+      "project created",
+    );
+    return await reply.code(201).send(project);
+  },
+);
+
+// The catalog deliberately omits executable command strings from the response.
+app.get("/apps", async () => {
+  const applications = APP_DEFINITIONS.map(({ id, title }) => ({ id, title }));
+  app.log.debug({ appCount: applications.length }, "application catalog listed");
+  return applications;
+});
+
+// App routes translate project and app IDs into exact tmux session/window targets.
+app.post<{ Params: { projectId: string; appId: string } }>(
+  "/projects/:projectId/apps/:appId/launch",
+  async (request, reply) => {
+    const project = await projectRepository.getProject(request.params.projectId);
+    const application = findApplication(request.params.appId);
+    if (project === undefined || application === undefined) {
+      request.log.warn(
+        {
+          projectId: request.params.projectId,
+          appId: request.params.appId,
+          projectFound: project !== undefined,
+          appFound: application !== undefined,
+        },
+        "app launch target not found",
+      );
+      return await reply.code(404).send();
+    }
+
+    request.log.info(
+      { projectId: project.id, appId: application.id },
+      "app launch requested",
+    );
+    await ensureAppWindow(project, application);
+    return await reply.code(204).send();
+  },
+);
+
+app.get<{ Params: { projectId: string; appId: string } }>(
+  "/projects/:projectId/apps/:appId/snapshot",
+  async (request, reply) => {
+    const project = await projectRepository.getProject(request.params.projectId);
+    const application = findApplication(request.params.appId);
+    if (project === undefined || application === undefined) {
+      request.log.warn(
+        {
+          projectId: request.params.projectId,
+          appId: request.params.appId,
+          projectFound: project !== undefined,
+          appFound: application !== undefined,
+        },
+        "snapshot target not found",
+      );
+      return await reply.code(404).send();
+    }
+
+    return await captureApp(project, application);
+  },
+);
+
+app.post<{ Params: { projectId: string; appId: string; action: string } }>(
+  "/projects/:projectId/apps/:appId/actions/:action",
+  async (request, reply) => {
+    const project = await projectRepository.getProject(request.params.projectId);
+    const application = findApplication(request.params.appId);
+    const key = ACTION_KEYS[request.params.action];
+    if (project === undefined || application === undefined || key === undefined) {
+      request.log.warn(
+        {
+          projectId: request.params.projectId,
+          appId: request.params.appId,
+          action: request.params.action,
+          projectFound: project !== undefined,
+          appFound: application !== undefined,
+          actionKnown: key !== undefined,
+        },
+        "action target not found",
+      );
+      return await reply.code(404).send();
+    }
+
+    if (!(await appWindowExists(project, application))) {
+      request.log.warn(
+        { projectId: project.id, appId: application.id, action: request.params.action },
+        "action requested for a stopped app",
+      );
+      return await reply.code(404).send();
+    }
+
+    await tmux("send-keys", "-t", paneTarget(project, application), key);
+    request.log.info(
+      {
+        projectId: project.id,
+        appId: application.id,
+        action: request.params.action,
+        target: paneTarget(project, application),
+      },
+      "app action sent",
+    );
     return await reply.code(204).send();
   },
 );
 
 try {
-  await app.listen({ host: AGENT_HOST, port: AGENT_PORT });
+  const address = await app.listen({ host: AGENT_HOST, port: AGENT_PORT });
+  app.log.info(
+    { address, host: AGENT_HOST, port: AGENT_PORT, logLevel: AGENT_LOG_LEVEL },
+    "Remote Deck agent started",
+  );
 } catch (error) {
-  app.log.error(error);
+  app.log.fatal({ err: error, host: AGENT_HOST, port: AGENT_PORT }, "agent failed to start");
   process.exitCode = 1;
 }

@@ -17,6 +17,9 @@ apps/mobile/web-build/
 dist/
 *.tsbuildinfo
 
+# Agent runtime state
+apps/agent/.data/
+
 # Editor and OS files
 .DS_Store
 .idea/

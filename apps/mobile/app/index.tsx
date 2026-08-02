@@ -1,3 +1,6 @@
+/** Project list and creation route for the Remote Deck mobile app. */
+
+import { router } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useState } from "react";
 import {
@@ -6,195 +9,176 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
-import TerminalView, { type TerminalFrame } from "../components/TerminalView";
+import {
+  createProject as createRemoteProject,
+  listProjects,
+  type Project,
+} from "../lib/agent";
 
-const AGENT_URL = "http://192.168.86.75:43820";
-const VIEW: DeckView = "lazygit";
-const REFRESH_DELAY_MS = 100;
-
-type DeckView = "lazygit";
-type Action = "open" | "up" | "down";
-
-const actionFeedback: Record<Action, string> = {
-  open: "LazyGit opened",
-  up: "Moved up",
-  down: "Moved down",
-};
-
-async function request(path: string, init?: RequestInit): Promise<Response> {
-  const response = await fetch(`${AGENT_URL}${path}`, init);
-  if (!response.ok) {
-    throw new Error(`Agent request failed with status ${response.status}.`);
-  }
-  return response;
-}
-
-async function getSnapshot(view: DeckView): Promise<TerminalFrame> {
-  const response = await request(`/views/${view}/snapshot`);
-  return (await response.json()) as TerminalFrame;
-}
-
-async function runRemoteAction(view: DeckView, action: Action): Promise<void> {
-  await request(`/views/${view}/actions/${action}`, { method: "POST" });
-}
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
+/** Converts caught values into concise messages suitable for the visible error area. */
 function messageFrom(error: unknown): string {
-  return error instanceof Error
-    ? error.message
-    : "An unexpected error occurred.";
+  return error instanceof Error ? error.message : "An unexpected error occurred.";
 }
 
-interface DeckButtonProps {
-  label: string;
-  accessibilityHint: string;
-  busy: boolean;
-  disabled: boolean;
-  onPress(): void;
-}
-
-function DeckButton({
-  label,
-  accessibilityHint,
-  busy,
-  disabled,
-  onPress,
-}: DeckButtonProps) {
-  return (
-    <Pressable
-      accessibilityHint={accessibilityHint}
-      accessibilityLabel={label}
-      accessibilityRole="button"
-      accessibilityState={{ busy, disabled }}
-      disabled={disabled}
-      onPress={onPress}
-      style={({ pressed }) => [
-        styles.button,
-        disabled && styles.buttonDisabled,
-        pressed && !disabled && styles.buttonPressed,
-      ]}
-    >
-      {busy ? (
-        <ActivityIndicator color="#ffffff" />
-      ) : (
-        <Text style={styles.buttonText}>{label}</Text>
-      )}
-    </Pressable>
-  );
-}
-
+/** Lists persisted projects and registers new name/directory pairs. */
 export default function Index() {
-  const [snapshot, setSnapshot] = useState<TerminalFrame | null>(null);
-  const [pendingAction, setPendingAction] = useState<Action | null>(null);
-  const [feedback, setFeedback] = useState<string | null>(null);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [name, setName] = useState("");
+  const [directory, setDirectory] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    getSnapshot(VIEW)
-      .then(setSnapshot)
+    listProjects()
+      .then((loadedProjects) => {
+        console.info("[projects] project list loaded", { count: loadedProjects.length });
+        setProjects(loadedProjects);
+      })
       .catch((loadError: unknown) => {
+        console.error("[projects] failed to load project list", { error: loadError });
         setError(messageFrom(loadError));
-      });
+      })
+      .finally(() => setLoading(false));
   }, []);
 
-  async function runAction(action: Action): Promise<void> {
-    if (pendingAction !== null) {
+  /** Navigates from the project list to one project's application launcher. */
+  function openProject(projectId: string): void {
+    console.info("[projects] opening project", { projectId });
+    router.push({ pathname: "/projects/[projectId]", params: { projectId } });
+  }
+
+  /** Persists a completed form, updates the local list, and opens the new project. */
+  async function createProject(): Promise<void> {
+    if (creating || name.trim() === "" || directory.trim() === "") {
       return;
     }
 
-    setPendingAction(action);
-    setFeedback(null);
+    setCreating(true);
     setError(null);
+    console.info("[projects] creating project", { name: name.trim() });
 
     try {
-      await runRemoteAction(VIEW, action);
-      await delay(REFRESH_DELAY_MS);
-      setSnapshot(await getSnapshot(VIEW));
-      setFeedback(actionFeedback[action]);
-    } catch (actionError) {
-      setError(messageFrom(actionError));
+      const project = await createRemoteProject(name.trim(), directory.trim());
+      console.info("[projects] project created", { projectId: project.id });
+      setProjects((currentProjects) => [...currentProjects, project]);
+      setName("");
+      setDirectory("");
+      openProject(project.id);
+    } catch (createError) {
+      console.error("[projects] failed to create project", { error: createError });
+      setError(messageFrom(createError));
     } finally {
-      setPendingAction(null);
+      setCreating(false);
     }
   }
 
-  const controlsDisabled = pendingAction !== null;
-  const navigationDisabled = controlsDisabled || snapshot?.running !== true;
+  const formComplete = name.trim() !== "" && directory.trim() !== "";
 
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style="light" />
       <View style={styles.page}>
-        <View style={styles.terminal}>
-          {snapshot === null ? (
-            <Text style={styles.terminalMessage}>
-              {error === null ? "Loading…" : "Snapshot unavailable."}
-            </Text>
-          ) : snapshot.running ? (
-            <TerminalView
-              dom={{ scrollEnabled: true, style: styles.terminalWebView }}
-              frame={snapshot}
-            />
-          ) : (
-            <Text style={styles.terminalMessage}>LazyGit is not running.</Text>
-          )}
+        <View style={styles.header}>
+          <Text accessibilityRole="header" style={styles.title}>
+            Projects
+          </Text>
+          <Text style={styles.subtitle}>
+            Each project owns one persistent remote workspace.
+          </Text>
         </View>
 
-        <ScrollView
-          contentContainerStyle={styles.controlRailContent}
-          showsVerticalScrollIndicator={false}
-          style={styles.controlRail}
-        >
-          <View style={styles.messages}>
-            {feedback === null ? null : (
-              <Text accessibilityLiveRegion="polite" style={styles.feedback}>
-                {feedback}
-              </Text>
+        <View style={styles.content}>
+          <View style={styles.projectPanel}>
+            <Text style={styles.sectionTitle}>Your projects</Text>
+            {loading ? (
+              <ActivityIndicator color="#38bdf8" size="large" style={styles.loader} />
+            ) : (
+              <ScrollView contentContainerStyle={styles.projectList}>
+                {projects.length === 0 ? (
+                  <Text style={styles.emptyText}>Create your first project to begin.</Text>
+                ) : (
+                  projects.map((project) => (
+                    <Pressable
+                      accessibilityHint={`Opens the app launcher for ${project.name}`}
+                      accessibilityLabel={project.name}
+                      accessibilityRole="button"
+                      key={project.id}
+                      onPress={() => openProject(project.id)}
+                      style={({ pressed }) => [
+                        styles.projectCard,
+                        pressed && styles.cardPressed,
+                      ]}
+                    >
+                      <Text style={styles.projectName}>{project.name}</Text>
+                      <Text numberOfLines={2} style={styles.projectDirectory}>
+                        {project.directory}
+                      </Text>
+                    </Pressable>
+                  ))
+                )}
+              </ScrollView>
             )}
+          </View>
+
+          <View style={styles.createPanel}>
+            <Text style={styles.sectionTitle}>New project</Text>
+            <Text style={styles.fieldLabel}>Name</Text>
+            <TextInput
+              accessibilityLabel="Project name"
+              autoCapitalize="words"
+              onChangeText={setName}
+              placeholder="Remote Deck"
+              placeholderTextColor="#64748b"
+              style={styles.input}
+              value={name}
+            />
+            <Text style={styles.fieldLabel}>Directory</Text>
+            <TextInput
+              accessibilityLabel="Project directory"
+              autoCapitalize="none"
+              autoCorrect={false}
+              onChangeText={setDirectory}
+              onSubmitEditing={() => void createProject()}
+              placeholder="/home/anoni/Code/example"
+              placeholderTextColor="#64748b"
+              returnKeyType="done"
+              style={[styles.input, styles.directoryInput]}
+              value={directory}
+            />
+
             {error === null ? null : (
               <Text accessibilityLiveRegion="assertive" style={styles.error}>
                 {error}
               </Text>
             )}
-          </View>
 
-          <View style={styles.controls}>
-            <DeckButton
-              accessibilityHint="Opens or restarts the dedicated LazyGit session"
-              busy={pendingAction === "open"}
-              disabled={controlsDisabled}
-              label="Open / Restart"
-              onPress={() => void runAction("open")}
-            />
-            <View style={styles.navigationRow}>
-              <View style={styles.navigationButton}>
-                <DeckButton
-                  accessibilityHint="Moves the LazyGit selection up by one row"
-                  busy={pendingAction === "up"}
-                  disabled={navigationDisabled}
-                  label="Up"
-                  onPress={() => void runAction("up")}
-                />
-              </View>
-              <View style={styles.navigationButton}>
-                <DeckButton
-                  accessibilityHint="Moves the LazyGit selection down by one row"
-                  busy={pendingAction === "down"}
-                  disabled={navigationDisabled}
-                  label="Down"
-                  onPress={() => void runAction("down")}
-                />
-              </View>
-            </View>
+            <Pressable
+              accessibilityHint="Registers this directory as a project"
+              accessibilityLabel="Create project"
+              accessibilityRole="button"
+              accessibilityState={{ busy: creating, disabled: !formComplete || creating }}
+              disabled={!formComplete || creating}
+              onPress={() => void createProject()}
+              style={({ pressed }) => [
+                styles.createButton,
+                (!formComplete || creating) && styles.buttonDisabled,
+                pressed && formComplete && !creating && styles.buttonPressed,
+              ]}
+            >
+              {creating ? (
+                <ActivityIndicator color="#ffffff" />
+              ) : (
+                <Text style={styles.createButtonText}>Create project</Text>
+              )}
+            </Pressable>
           </View>
-        </ScrollView>
+        </View>
       </View>
     </SafeAreaView>
   );
@@ -207,68 +191,113 @@ const styles = StyleSheet.create({
   },
   page: {
     flex: 1,
+    gap: 18,
+    padding: 20,
+  },
+  header: {
+    gap: 4,
+  },
+  title: {
+    color: "#f8fafc",
+    fontSize: 32,
+    fontWeight: "800",
+  },
+  subtitle: {
+    color: "#94a3b8",
+    fontSize: 16,
+  },
+  content: {
+    flex: 1,
     flexDirection: "row",
-    gap: 8,
-    padding: 4,
+    gap: 18,
+    minHeight: 0,
   },
-  terminal: {
+  projectPanel: {
     flex: 1,
-    minWidth: 0,
-    borderRadius: 12,
-    backgroundColor: "#020617",
-    overflow: "hidden",
-    padding: 4,
+    gap: 12,
   },
-  terminalWebView: {
-    flex: 1,
-    backgroundColor: "#020617",
+  createPanel: {
+    width: "38%",
+    minWidth: 300,
+    maxWidth: 460,
+    alignSelf: "flex-start",
+    gap: 10,
+    borderRadius: 16,
+    backgroundColor: "#0f1d2e",
+    padding: 18,
   },
-  terminalMessage: {
-    color: "#dbeafe",
+  sectionTitle: {
+    color: "#e2e8f0",
+    fontSize: 21,
+    fontWeight: "700",
+  },
+  loader: {
+    marginTop: 40,
+  },
+  projectList: {
+    gap: 10,
+    paddingBottom: 12,
+  },
+  emptyText: {
+    color: "#94a3b8",
+    fontSize: 17,
+    paddingVertical: 28,
+  },
+  projectCard: {
+    gap: 6,
+    borderColor: "#1e3a52",
+    borderWidth: 1,
+    borderRadius: 14,
+    backgroundColor: "#0f1d2e",
+    paddingHorizontal: 18,
+    paddingVertical: 16,
+  },
+  cardPressed: {
+    backgroundColor: "#16324a",
+  },
+  projectName: {
+    color: "#f8fafc",
+    fontSize: 21,
+    fontWeight: "700",
+  },
+  projectDirectory: {
+    color: "#94a3b8",
     fontFamily: "monospace",
-    fontSize: 12,
-    lineHeight: 17,
+    fontSize: 13,
+    lineHeight: 18,
   },
-  controlRail: {
-    width: "18%",
-    minWidth: 125,
-    maxWidth: 200,
-  },
-  controlRailContent: {
-    flexGrow: 1,
-    gap: 8,
-  },
-  messages: {
-    gap: 8,
-  },
-  feedback: {
-    color: "#86efac",
-    fontSize: 15,
+  fieldLabel: {
+    color: "#cbd5e1",
+    fontSize: 14,
     fontWeight: "600",
+    marginTop: 4,
+  },
+  input: {
+    minHeight: 48,
+    borderColor: "#334155",
+    borderWidth: 1,
+    borderRadius: 10,
+    backgroundColor: "#07111f",
+    color: "#f8fafc",
+    fontSize: 17,
+    paddingHorizontal: 12,
+  },
+  directoryInput: {
+    fontFamily: "monospace",
+    fontSize: 14,
   },
   error: {
     color: "#fecaca",
-    fontSize: 15,
-    lineHeight: 21,
+    fontSize: 14,
+    lineHeight: 19,
   },
-  controls: {
-    gap: 8,
-    marginTop: "auto",
-  },
-  navigationRow: {
-    flexDirection: "row",
-    gap: 8,
-  },
-  navigationButton: {
-    flex: 1,
-  },
-  button: {
-    minHeight: 48,
+  createButton: {
+    minHeight: 52,
     alignItems: "center",
     justifyContent: "center",
     borderRadius: 10,
     backgroundColor: "#0369a1",
-    paddingHorizontal: 4,
+    marginTop: 8,
   },
   buttonDisabled: {
     backgroundColor: "#334155",
@@ -277,7 +306,7 @@ const styles = StyleSheet.create({
   buttonPressed: {
     backgroundColor: "#0284c7",
   },
-  buttonText: {
+  createButtonText: {
     color: "#ffffff",
     fontSize: 18,
     fontWeight: "800",
