@@ -6,11 +6,13 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
+    "test": "node --import tsx --test --test-isolation=none \"test/**/*.test.ts\"",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "fastify": "5.11.0"
+    "fastify": "5.11.0",
+    "yaml": "2.9.0"
   },
   "devDependencies": {
     "@eslint/js": "9.39.2",

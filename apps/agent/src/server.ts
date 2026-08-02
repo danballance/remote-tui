@@ -4,7 +4,7 @@
  * The HTTP API exposes persisted projects and an allow-listed application
  * catalog. Each project maps to one tmux session and each application maps to a
  * single named window whose primary pane is captured and controlled through
- * actions defined by that application.
+ * actions loaded from the server-owned YAML catalog at startup.
  */
 
 import { execFile } from "node:child_process";
@@ -14,6 +14,11 @@ import { promisify } from "node:util";
 
 import Fastify from "fastify";
 
+import {
+  APPLICATION_CATALOG_PATH,
+  loadApplicationCatalog,
+  type AppDefinition,
+} from "./applications.js";
 import {
   createJsonProjectRepository,
   type Project,
@@ -33,25 +38,6 @@ const TERMINAL_ROWS = 35;
 const TERMINAL_METADATA_FORMAT =
   "#{pane_width}\t#{pane_height}\t#{cursor_x}\t#{cursor_y}\t#{cursor_flag}";
 
-/** A server-owned action exposed by ID while its tmux behavior remains private. */
-interface AppActionDefinition {
-  /** Stable route identifier, scoped to the application that owns the action. */
-  id: string;
-  /** Client-safe text used to render and announce the action button. */
-  label: string;
-  /** Arguments appended after the server-owned `send-keys -t <pane>` prefix. */
-  sendKeysArgs: readonly string[];
-}
-
-/** A server-owned application that clients may launch but may not reconfigure. */
-interface AppDefinition {
-  id: string;
-  title: string;
-  command: string;
-  /** Ordered controls advertised to clients and resolved only within this app. */
-  actions: readonly AppActionDefinition[];
-}
-
 /** Complete terminal grid and cursor state returned to the mobile renderer. */
 interface TerminalFrame {
   running: boolean;
@@ -69,39 +55,31 @@ interface TmuxOptions {
   logResponse?: boolean;
 }
 
-/** Fixed catalog; clients select application and action IDs but never supply commands. */
-const APP_DEFINITIONS: readonly AppDefinition[] = [
-  {
-    id: "lazygit",
-    title: "LazyGit",
-    command: "exec lazygit",
-    actions: [
-      { id: "up", label: "Up", sendKeysArgs: ["Up"] },
-      { id: "down", label: "Down", sendKeysArgs: ["Down"] },
-    ],
-  },
-  {
-    id: "yazi",
-    title: "Yazi",
-    command: "exec yazi",
-    actions: [
-      { id: "up", label: "Up", sendKeysArgs: ["Up"] },
-      { id: "down", label: "Down", sendKeysArgs: ["Down"] },
-    ],
-  },
-  {
-    id: "pi",
-    title: "Pi",
-    command: "exec pi",
-    actions: [
-      { id: "up", label: "Up", sendKeysArgs: ["Up"] },
-      { id: "down", label: "Down", sendKeysArgs: ["Down"] },
-    ],
-  },
-];
-
 const execFileAsync = promisify(execFile);
 const app = Fastify({ logger: { level: AGENT_LOG_LEVEL } });
+
+/** Loads the complete command allow-list before any HTTP routes can be served. */
+async function openApplicationCatalog(): Promise<readonly AppDefinition[]> {
+  try {
+    const applications = await loadApplicationCatalog();
+    app.log.info(
+      {
+        applicationCatalogPath: APPLICATION_CATALOG_PATH,
+        appCount: applications.length,
+      },
+      "application catalog loaded",
+    );
+    return applications;
+  } catch (error) {
+    app.log.fatal(
+      { err: error, applicationCatalogPath: APPLICATION_CATALOG_PATH },
+      "failed to load application catalog",
+    );
+    throw error;
+  }
+}
+
+const APP_DEFINITIONS = await openApplicationCatalog();
 
 /** Extracts child-process output from an unknown error for safe structured logging. */
 function commandResponse(error: unknown): { stdout: unknown; stderr: unknown } {

@@ -6,9 +6,10 @@
   "scripts": {
     "dev:agent": "pnpm --filter @remote-deck/agent dev",
     "dev:mobile": "pnpm --filter @remote-deck/mobile start",
+    "test": "pnpm --recursive --if-present test",
     "lint": "pnpm --recursive --if-present lint",
     "typecheck": "pnpm --recursive --if-present typecheck",
     "expo:doctor": "pnpm --filter @remote-deck/mobile exec expo-doctor",
-    "check": "pnpm lint && pnpm typecheck && pnpm expo:doctor"
+    "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm expo:doctor"
   }
 }

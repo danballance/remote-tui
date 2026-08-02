@@ -1,0 +1,39 @@
+# Trusted, server-owned application catalog. Changes take effect after the
+# agent restarts; executable commands and tmux arguments are never sent to clients.
+# Apps and actions appear on clients in this file's order. IDs must begin with a
+# lowercase letter or number and may also contain hyphens and underscores.
+# `command` is the tmux window command; each non-empty `sendKeysArgs` array is
+# appended after the agent-controlled `tmux send-keys -t <app-pane>` arguments.
+apps:
+  - id: lazygit
+    title: LazyGit
+    command: exec lazygit
+    actions:
+      - id: up
+        label: Up
+        sendKeysArgs: [Up]
+      - id: down
+        label: Down
+        sendKeysArgs: [Down]
+
+  - id: yazi
+    title: Yazi
+    command: exec yazi
+    actions:
+      - id: up
+        label: Up
+        sendKeysArgs: [Up]
+      - id: down
+        label: Down
+        sendKeysArgs: [Down]
+
+  - id: pi
+    title: Pi
+    command: exec pi
+    actions:
+      - id: up
+        label: Up
+        sendKeysArgs: [Up]
+      - id: down
+        label: Down
+        sendKeysArgs: [Down]
