@@ -15,8 +15,15 @@ import { promisify } from "node:util";
 import Fastify from "fastify";
 
 import {
+  executeAppAction,
+  InvalidActionRequestError,
+  PaneActionQueue,
+  parseActionRequestInput,
+} from "./actions.js";
+import {
   APPLICATION_CATALOG_PATH,
   loadApplicationCatalog,
+  publicApplication,
   type AppDefinition,
 } from "./applications.js";
 import {
@@ -24,6 +31,11 @@ import {
   type Project,
   type ProjectRepository,
 } from "./projects.js";
+import {
+  privateInputLogCommand,
+  privateTmuxFailureError,
+  privateTmuxFailureStatus,
+} from "./tmux-privacy.js";
 
 const AGENT_HOST = "192.168.86.75";
 const AGENT_PORT = 43_820;
@@ -53,10 +65,15 @@ interface TerminalFrame {
 interface TmuxOptions {
   logFailureAsDebug?: boolean;
   logResponse?: boolean;
+  /** Prevents private argv and child-process errors from reaching structured logs. */
+  sensitive?: boolean;
+  /** Safe command representation used instead of the actual sensitive argv. */
+  loggedCommand?: readonly string[];
 }
 
 const execFileAsync = promisify(execFile);
 const app = Fastify({ logger: { level: AGENT_LOG_LEVEL } });
+const paneActionQueue = new PaneActionQueue();
 
 /** Loads the complete command allow-list before any HTTP routes can be served. */
 async function openApplicationCatalog(): Promise<readonly AppDefinition[]> {
@@ -101,18 +118,36 @@ function commandResponse(error: unknown): { stdout: unknown; stderr: unknown } {
  */
 async function runTmux(args: string[], options: TmuxOptions = {}): Promise<string> {
   const command = ["tmux", ...args];
+  const loggedCommand =
+    options.sensitive === true
+      ? (options.loggedCommand ?? ["tmux", args[0] ?? "command", "[REDACTED]"])
+      : command;
   const logResponse = options.logResponse ?? true;
 
   try {
     const { stdout, stderr } = await execFileAsync("tmux", args, { encoding: "utf8" });
-    const response = logResponse ? { stdout, stderr } : { stderr };
-    app.log.debug({ command, response }, "tmux command completed");
+    const response =
+      options.sensitive === true
+        ? undefined
+        : logResponse
+          ? { stdout, stderr }
+          : { stderr };
+    app.log.debug({ command: loggedCommand, response }, "tmux command completed");
     return stdout;
   } catch (error) {
+    if (options.sensitive === true) {
+      app.log.error(
+        { command: loggedCommand, failure: privateTmuxFailureStatus(error) },
+        "sensitive tmux command failed",
+      );
+      // Do not attach the child error: Node includes the original argv in its message.
+      throw privateTmuxFailureError();
+    }
+
     const response = commandResponse(error);
     const context = {
       ...(logResponse && !options.logFailureAsDebug && { err: error }),
-      command,
+      command: loggedCommand,
       response: logResponse ? response : { stderr: response.stderr },
     };
 
@@ -350,15 +385,6 @@ function findApplication(appId: string): AppDefinition | undefined {
   return APP_DEFINITIONS.find((application) => application.id === appId);
 }
 
-/** Projects an app definition to client-safe metadata, preserving action order. */
-function publicApplication(application: AppDefinition) {
-  return {
-    id: application.id,
-    title: application.title,
-    actions: application.actions.map(({ id, label }) => ({ id, label })),
-  };
-}
-
 // Project routes expose the repository without leaking its JSON representation.
 app.get("/projects", async () => {
   const projects = await projectRepository.listProjects();
@@ -476,7 +502,10 @@ app.get<{ Params: { projectId: string; appId: string } }>(
   },
 );
 
-app.post<{ Params: { projectId: string; appId: string; actionId: string } }>(
+app.post<{
+  Params: { projectId: string; appId: string; actionId: string };
+  Body: unknown;
+}>(
   "/projects/:projectId/apps/:appId/actions/:actionId",
   async (request, reply) => {
     const project = await projectRepository.getProject(request.params.projectId);
@@ -500,6 +529,25 @@ app.post<{ Params: { projectId: string; appId: string; actionId: string } }>(
       return await reply.code(404).send();
     }
 
+    let actionInput: string | undefined;
+    try {
+      actionInput = parseActionRequestInput(action, request.body);
+    } catch (error) {
+      if (!(error instanceof InvalidActionRequestError)) {
+        throw error;
+      }
+      request.log.warn(
+        {
+          projectId: project.id,
+          appId: application.id,
+          actionId: action.id,
+          reason: error.message,
+        },
+        "invalid app action request",
+      );
+      return await reply.code(400).send();
+    }
+
     if (!(await appWindowExists(project, application))) {
       request.log.warn(
         { projectId: project.id, appId: application.id, actionId: action.id },
@@ -508,19 +556,30 @@ app.post<{ Params: { projectId: string; appId: string; actionId: string } }>(
       return await reply.code(404).send();
     }
 
-    // The route selects only configured suffix arguments; the command and pane stay private.
-    await tmux(
-      "send-keys",
-      "-t",
-      paneTarget(project, application),
-      ...action.sendKeysArgs,
-    );
+    const target = paneTarget(project, application);
+    await paneActionQueue.run(target, async () => {
+      await executeAppAction(
+        action,
+        actionInput,
+        async (_phase, arguments_, options) => {
+          if (!options.literal) {
+            await tmux("send-keys", "-t", target, ...arguments_);
+            return;
+          }
+
+          await runTmux(["send-keys", "-t", target, "-l", "--", ...arguments_], {
+            sensitive: options.sensitive,
+            loggedCommand: privateInputLogCommand(target),
+          });
+        },
+      );
+    });
     request.log.info(
       {
         projectId: project.id,
         appId: application.id,
         actionId: action.id,
-        target: paneTarget(project, application),
+        target,
       },
       "app action sent",
     );

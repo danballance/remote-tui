@@ -13,6 +13,9 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
+import ActionInputModal, {
+  type RemoteTextInputAction,
+} from "../../../../components/ActionInputModal";
 import TerminalView, { type TerminalFrame } from "../../../../components/TerminalView";
 import {
   getApp,
@@ -83,6 +86,8 @@ export default function AppTerminal() {
   const [application, setApplication] = useState<RemoteApp | null>(null);
   const [snapshot, setSnapshot] = useState<TerminalFrame | null>(null);
   const [pendingActionId, setPendingActionId] = useState<string | null>(null);
+  const [inputAction, setInputAction] = useState<RemoteTextInputAction | null>(null);
+  const [inputDraft, setInputDraft] = useState("");
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -111,8 +116,8 @@ export default function AppTerminal() {
       });
   }, [appId, projectId]);
 
-  /** Sends an action, waits for the redraw, and replaces the visible frame. */
-  async function runAction(action: RemoteAppAction): Promise<void> {
+  /** Sends an action and refreshes the terminal even when execution fails partway. */
+  async function runAction(action: RemoteAppAction, input?: string): Promise<void> {
     if (pendingActionId !== null) {
       return;
     }
@@ -124,41 +129,101 @@ export default function AppTerminal() {
       projectId,
       appId,
       actionId: action.id,
+      hasInput: input !== undefined,
     });
 
+    let actionError: unknown;
     try {
-      await runRemoteAction(projectId, appId, action.id);
-      await delay(REFRESH_DELAY_MS);
-      const refreshedSnapshot = await getSnapshot(projectId, appId);
-      setSnapshot(refreshedSnapshot);
-      setFeedback(`${action.label} sent.`);
-      console.info("[terminal] app action completed and snapshot refreshed", {
-        projectId,
-        appId,
-        actionId: action.id,
-        running: refreshedSnapshot.running,
-      });
-    } catch (actionError) {
+      await runRemoteAction(projectId, appId, action.id, input);
+    } catch (caughtActionError) {
+      actionError = caughtActionError;
       console.error("[terminal] app action failed", {
         projectId,
         appId,
         actionId: action.id,
-        error: actionError,
+        error: caughtActionError,
       });
-      setError(messageFrom(actionError));
+    }
+
+    try {
+      await delay(REFRESH_DELAY_MS);
+      const refreshedSnapshot = await getSnapshot(projectId, appId);
+      setSnapshot(refreshedSnapshot);
+      if (actionError === undefined) {
+        setFeedback(`${action.label} sent.`);
+        console.info("[terminal] app action completed and snapshot refreshed", {
+          projectId,
+          appId,
+          actionId: action.id,
+          running: refreshedSnapshot.running,
+        });
+      } else {
+        setError(messageFrom(actionError));
+      }
+    } catch (refreshError) {
+      console.error("[terminal] failed to refresh after app action", {
+        projectId,
+        appId,
+        actionId: action.id,
+        error: refreshError,
+      });
+      setError(messageFrom(actionError ?? refreshError));
     } finally {
       setPendingActionId(null);
     }
   }
 
+  /** Opens a prompt for input actions and immediately runs all other actions. */
+  function handleActionPress(action: RemoteAppAction): void {
+    if (action.input === undefined) {
+      void runAction(action);
+      return;
+    }
+
+    setFeedback(null);
+    setError(null);
+    setInputDraft("");
+    setInputAction({ ...action, input: action.input });
+  }
+
+  /** Closes the prompt without sending any keys or text. */
+  function cancelActionInput(): void {
+    setInputAction(null);
+    setInputDraft("");
+  }
+
+  /** Clears the draft before sending the complete configured input action. */
+  function submitActionInput(): void {
+    if (inputAction === null || pendingActionId !== null) {
+      return;
+    }
+    const input = inputDraft.trim();
+    if (inputAction.input.required && input === "") {
+      return;
+    }
+
+    const action = inputAction;
+    setInputAction(null);
+    setInputDraft("");
+    void runAction(action, input);
+  }
+
   // Keep every configured action inert until the pane is known to be running and idle.
-  const controlsDisabled = pendingActionId !== null || snapshot?.running !== true;
+  const controlsDisabled =
+    pendingActionId !== null || inputAction !== null || snapshot?.running !== true;
   // The route ID remains a useful heading while canonical metadata is still loading.
   const appTitle = application?.title ?? appId;
 
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style="light" />
+      <ActionInputModal
+        action={inputAction}
+        onCancel={cancelActionInput}
+        onChange={setInputDraft}
+        onSubmit={submitActionInput}
+        value={inputDraft}
+      />
       <View style={styles.page}>
         <View style={styles.terminal}>
           {snapshot === null ? (
@@ -215,11 +280,15 @@ export default function AppTerminal() {
                 {application?.actions.map((action) => (
                   <View key={action.id} style={styles.actionButton}>
                     <DeckButton
-                      accessibilityHint={`Sends ${action.label} to ${appTitle}`}
+                      accessibilityHint={
+                        action.input === undefined
+                          ? `Sends ${action.label} to ${appTitle}`
+                          : `Opens text input for ${action.label}`
+                      }
                       busy={pendingActionId === action.id}
                       disabled={controlsDisabled}
                       label={action.label}
-                      onPress={() => void runAction(action)}
+                      onPress={() => handleActionPress(action)}
                     />
                   </View>
                 ))}

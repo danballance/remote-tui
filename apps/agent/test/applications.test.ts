@@ -8,6 +8,7 @@ import {
   APPLICATION_CATALOG_PATH,
   loadApplicationCatalog,
   parseApplicationCatalog,
+  publicApplication,
 } from "../src/applications.js";
 
 /** Builds the smallest valid app while letting each test isolate one field. */
@@ -54,6 +55,22 @@ test("loads the checked-in catalog with private command definitions intact", asy
       title: "LazyGit",
       command: "exec lazygit",
       actions: [
+        { id: "push", label: "Push", sendKeysArgs: ["P"] },
+        { id: "pull", label: "Pull", sendKeysArgs: ["p"] },
+        { id: "stage", label: "Stage", sendKeysArgs: ["Space"] },
+        {
+          id: "commit",
+          label: "Commit",
+          sendKeysArgs: ["c"],
+          input: {
+            type: "text",
+            label: "Commit message",
+            placeholder: "Summary of changes",
+            required: true,
+            maxLength: 256,
+          },
+          sendKeysAfterInputArgs: ["Enter"],
+        },
         { id: "up", label: "Up", sendKeysArgs: ["Up"] },
         { id: "down", label: "Down", sendKeysArgs: ["Down"] },
       ],
@@ -109,6 +126,44 @@ test("preserves app, action, and tmux argument order", () => {
     },
     { id: "empty", title: "Empty", command: "exec empty", actions: [] },
   ]);
+});
+
+test("projects text input metadata without exposing private action keys", () => {
+  const [application] = parseApplicationCatalog(`apps:
+  - id: demo
+    title: Demo
+    command: exec demo
+    actions:
+      - id: rename
+        label: Rename
+        sendKeysArgs: [r]
+        input:
+          type: text
+          label: New name
+          placeholder: Name
+          required: true
+          maxLength: 80
+        sendKeysAfterInputArgs: [Enter, Down]
+`);
+
+  assert.ok(application !== undefined);
+  assert.deepEqual(publicApplication(application), {
+    id: "demo",
+    title: "Demo",
+    actions: [
+      {
+        id: "rename",
+        label: "Rename",
+        input: {
+          type: "text",
+          label: "New name",
+          placeholder: "Name",
+          required: true,
+          maxLength: 80,
+        },
+      },
+    ],
+  });
 });
 
 test("accepts an empty app catalog", () => {
@@ -237,6 +292,132 @@ test("rejects invalid action fields and arguments", () => {
         typo: true`,
     }),
     /^\$\.apps\[0\]\.actions\[0\]\.typo is not a supported field$/,
+  );
+});
+
+test("rejects invalid text input definitions and suffix keys", () => {
+  assertInvalid(
+    catalogWithApp({
+      actions: `
+      - id: run
+        label: Run
+        sendKeysArgs: [Enter]
+        input: text`,
+    }),
+    /^\$\.apps\[0\]\.actions\[0\]\.input must be an object$/,
+  );
+  assertInvalid(
+    catalogWithApp({
+      actions: `
+      - id: run
+        label: Run
+        sendKeysArgs: [Enter]
+        input:
+          type: select
+          label: Value
+          required: true
+          maxLength: 20`,
+    }),
+    /^\$\.apps\[0\]\.actions\[0\]\.input\.type must be "text"$/,
+  );
+  assertInvalid(
+    catalogWithApp({
+      actions: `
+      - id: run
+        label: Run
+        sendKeysArgs: [Enter]
+        input:
+          type: text
+          label: ""
+          required: true
+          maxLength: 20`,
+    }),
+    /^\$\.apps\[0\]\.actions\[0\]\.input\.label must not be blank$/,
+  );
+  assertInvalid(
+    catalogWithApp({
+      actions: `
+      - id: run
+        label: Run
+        sendKeysArgs: [Enter]
+        input:
+          type: text
+          label: Value
+          placeholder: " "
+          required: true
+          maxLength: 20`,
+    }),
+    /^\$\.apps\[0\]\.actions\[0\]\.input\.placeholder must be a non-blank string/,
+  );
+  assertInvalid(
+    catalogWithApp({
+      actions: `
+      - id: run
+        label: Run
+        sendKeysArgs: [Enter]
+        input:
+          type: text
+          label: Value
+          required: yes
+          maxLength: 20`,
+    }),
+    /^\$\.apps\[0\]\.actions\[0\]\.input\.required must be a boolean$/,
+  );
+  for (const maxLength of ["0", "1.5", '"20"']) {
+    assertInvalid(
+      catalogWithApp({
+        actions: `
+      - id: run
+        label: Run
+        sendKeysArgs: [Enter]
+        input:
+          type: text
+          label: Value
+          required: true
+          maxLength: ${maxLength}`,
+      }),
+      /^\$\.apps\[0\]\.actions\[0\]\.input\.maxLength must be a positive integer$/,
+    );
+  }
+  assertInvalid(
+    catalogWithApp({
+      actions: `
+      - id: run
+        label: Run
+        sendKeysArgs: [Enter]
+        input:
+          type: text
+          label: Value
+          required: true
+          maxLength: 20
+          typo: true`,
+    }),
+    /^\$\.apps\[0\]\.actions\[0\]\.input\.typo is not a supported field$/,
+  );
+  assertInvalid(
+    catalogWithApp({
+      actions: `
+      - id: run
+        label: Run
+        sendKeysArgs: [Enter]
+        sendKeysAfterInputArgs: [Enter]`,
+    }),
+    /^\$\.apps\[0\]\.actions\[0\]\.sendKeysAfterInputArgs requires an input definition$/,
+  );
+  assertInvalid(
+    catalogWithApp({
+      actions: `
+      - id: run
+        label: Run
+        sendKeysArgs: [Enter]
+        input:
+          type: text
+          label: Value
+          required: true
+          maxLength: 20
+        sendKeysAfterInputArgs: []`,
+    }),
+    /^\$\.apps\[0\]\.actions\[0\]\.sendKeysAfterInputArgs must be a non-empty array/,
   );
 });
 

@@ -2,13 +2,32 @@
 # agent restarts; executable commands and tmux arguments are never sent to clients.
 # Apps and actions appear on clients in this file's order. IDs must begin with a
 # lowercase letter or number and may also contain hyphens and underscores.
-# `command` is the tmux window command; each non-empty `sendKeysArgs` array is
-# appended after the agent-controlled `tmux send-keys -t <app-pane>` arguments.
+# `command` is the tmux window command. Action key arguments stay private; an
+# optional `input` object contributes only its safe prompt metadata to clients.
 apps:
   - id: lazygit
     title: LazyGit
     command: exec lazygit
     actions:
+      - id: push
+        label: Push
+        sendKeysArgs: [P]
+      - id: pull
+        label: Pull
+        sendKeysArgs: [p]
+      - id: stage
+        label: Stage
+        sendKeysArgs: [Space]
+      - id: commit
+        label: Commit
+        sendKeysArgs: [c]
+        input:
+          type: text
+          label: Commit message
+          placeholder: Summary of changes
+          required: true
+          maxLength: 256
+        sendKeysAfterInputArgs: [Enter]
       - id: up
         label: Up
         sendKeysArgs: [Up]

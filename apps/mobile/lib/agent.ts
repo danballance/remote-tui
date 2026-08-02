@@ -17,11 +17,22 @@ export interface Project {
 }
 
 /** Client-safe action metadata used for route selection and button rendering. */
+export interface RemoteAppActionTextInput {
+  type: "text";
+  label: string;
+  placeholder?: string;
+  required: boolean;
+  maxLength: number;
+}
+
+/** Client-safe action metadata used for route selection and button rendering. */
 export interface RemoteAppAction {
   /** Stable identifier sent back to the app-scoped action route. */
   id: string;
   /** Agent-provided text displayed and announced by the mobile control. */
   label: string;
+  /** Optional prompt metadata; executable input behavior remains agent-owned. */
+  input?: RemoteAppActionTextInput;
 }
 
 /** Public catalog entry; executable commands and tmux arguments stay on the agent. */
@@ -122,8 +133,12 @@ export async function runRemoteAction(
   projectId: string,
   appId: string,
   actionId: string,
+  input?: string,
 ): Promise<void> {
-  await request(`/projects/${projectId}/apps/${appId}/actions/${actionId}`, {
-    method: "POST",
-  });
+  const init: RequestInit = { method: "POST" };
+  if (input !== undefined) {
+    init.body = JSON.stringify({ input });
+    init.headers = { "content-type": "application/json" };
+  }
+  await request(`/projects/${projectId}/apps/${appId}/actions/${actionId}`, init);
 }

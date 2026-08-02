@@ -11,14 +11,27 @@ import { fileURLToPath } from "node:url";
 
 import { parse } from "yaml";
 
+/** Client-safe instructions for collecting one line of text before an action runs. */
+export interface AppActionTextInputDefinition {
+  type: "text";
+  label: string;
+  placeholder?: string;
+  required: boolean;
+  maxLength: number;
+}
+
 /** A server-owned action exposed by ID while its tmux behavior remains private. */
 export interface AppActionDefinition {
   /** Stable route identifier, scoped to the application that owns the action. */
   id: string;
   /** Client-safe text used to render and announce the action button. */
   label: string;
-  /** Arguments appended after the server-owned `send-keys -t <pane>` prefix. */
+  /** Arguments sent before any configured text input. */
   sendKeysArgs: readonly string[];
+  /** Optional client-safe text prompt for this action. */
+  input?: AppActionTextInputDefinition;
+  /** Private keys sent after the text, when configured. */
+  sendKeysAfterInputArgs?: readonly string[];
 }
 
 /** A server-owned application that clients may launch but may not reconfigure. */
@@ -33,13 +46,40 @@ export interface AppDefinition {
   actions: readonly AppActionDefinition[];
 }
 
+/** Public catalog shape returned to clients without executable details. */
+export interface PublicAppDefinition {
+  id: string;
+  title: string;
+  actions: readonly PublicAppActionDefinition[];
+}
+
+/** Client-safe portion of one configured action. */
+export interface PublicAppActionDefinition {
+  id: string;
+  label: string;
+  input?: AppActionTextInputDefinition;
+}
+
 /** Fixed catalog path, resolved independently of the agent's working directory. */
 export const APPLICATION_CATALOG_PATH = fileURLToPath(
   new URL("../apps.yaml", import.meta.url),
 );
 
 const APP_FIELDS = new Set(["id", "title", "command", "actions"]);
-const ACTION_FIELDS = new Set(["id", "label", "sendKeysArgs"]);
+const ACTION_FIELDS = new Set([
+  "id",
+  "label",
+  "sendKeysArgs",
+  "input",
+  "sendKeysAfterInputArgs",
+]);
+const TEXT_INPUT_FIELDS = new Set([
+  "type",
+  "label",
+  "placeholder",
+  "required",
+  "maxLength",
+]);
 const CATALOG_FIELDS = new Set(["apps"]);
 const SAFE_ID_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
 
@@ -104,6 +144,72 @@ function requiredId(
   return id;
 }
 
+/** Reads a required boolean without accepting truthy YAML values. */
+function requiredBoolean(
+  value: Record<string, unknown>,
+  field: string,
+  path: string,
+): boolean {
+  const candidate = value[field];
+  if (typeof candidate !== "boolean") {
+    invalid(`${path}.${field}`, "must be a boolean");
+  }
+  return candidate;
+}
+
+/** Reads a required positive integer used to bound client and request input. */
+function requiredPositiveInteger(
+  value: Record<string, unknown>,
+  field: string,
+  path: string,
+): number {
+  const candidate = value[field];
+  if (!Number.isInteger(candidate) || (candidate as number) <= 0) {
+    invalid(`${path}.${field}`, "must be a positive integer");
+  }
+  return candidate as number;
+}
+
+/** Validates an ordered, non-empty tmux key argument array. */
+function requiredStringArray(value: unknown, path: string): readonly string[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    invalid(path, "must be a non-empty array of strings");
+  }
+  return value.map((argument, index) => {
+    if (typeof argument !== "string" || argument.trim() === "") {
+      invalid(`${path}[${index}]`, "must be a non-blank string");
+    }
+    return argument;
+  });
+}
+
+/** Validates the only input kind currently supported by action definitions. */
+function parseTextInput(value: unknown, path: string): AppActionTextInputDefinition {
+  if (!isRecord(value)) {
+    invalid(path, "must be an object");
+  }
+  rejectUnknownFields(value, TEXT_INPUT_FIELDS, path);
+  if (value.type !== "text") {
+    invalid(`${path}.type`, 'must be "text"');
+  }
+
+  const placeholder = value.placeholder;
+  if (
+    placeholder !== undefined &&
+    (typeof placeholder !== "string" || placeholder.trim() === "")
+  ) {
+    invalid(`${path}.placeholder`, "must be a non-blank string when provided");
+  }
+
+  return {
+    type: "text",
+    label: requiredString(value, "label", path),
+    ...(placeholder === undefined ? {} : { placeholder }),
+    required: requiredBoolean(value, "required", path),
+    maxLength: requiredPositiveInteger(value, "maxLength", path),
+  };
+}
+
 /** Validates one action and preserves its tmux argument order exactly. */
 function parseAction(value: unknown, path: string): AppActionDefinition {
   if (!isRecord(value)) {
@@ -111,22 +217,25 @@ function parseAction(value: unknown, path: string): AppActionDefinition {
   }
   rejectUnknownFields(value, ACTION_FIELDS, path);
 
-  const sendKeysArgsPath = `${path}.sendKeysArgs`;
-  const configuredArguments = value.sendKeysArgs;
-  if (!Array.isArray(configuredArguments) || configuredArguments.length === 0) {
-    invalid(sendKeysArgsPath, "must be a non-empty array of strings");
+  const sendKeysArgs = requiredStringArray(value.sendKeysArgs, `${path}.sendKeysArgs`);
+  const input = value.input === undefined ? undefined : parseTextInput(value.input, `${path}.input`);
+  const sendKeysAfterInputArgs =
+    value.sendKeysAfterInputArgs === undefined
+      ? undefined
+      : requiredStringArray(
+          value.sendKeysAfterInputArgs,
+          `${path}.sendKeysAfterInputArgs`,
+        );
+  if (sendKeysAfterInputArgs !== undefined && input === undefined) {
+    invalid(`${path}.sendKeysAfterInputArgs`, "requires an input definition");
   }
-  const sendKeysArgs = configuredArguments.map((argument, index) => {
-    if (typeof argument !== "string" || argument.trim() === "") {
-      invalid(`${sendKeysArgsPath}[${index}]`, "must be a non-blank string");
-    }
-    return argument;
-  });
 
   return {
     id: requiredId(value, "id", path),
     label: requiredString(value, "label", path),
     sendKeysArgs,
+    ...(input === undefined ? {} : { input }),
+    ...(sendKeysAfterInputArgs === undefined ? {} : { sendKeysAfterInputArgs }),
   };
 }
 
@@ -187,6 +296,19 @@ export function parseApplicationCatalog(source: string): readonly AppDefinition[
     appIds.add(parsedApplication.id);
     return parsedApplication;
   });
+}
+
+/** Removes private commands and tmux keys while retaining client input metadata. */
+export function publicApplication(application: AppDefinition): PublicAppDefinition {
+  return {
+    id: application.id,
+    title: application.title,
+    actions: application.actions.map(({ id, label, input }) => ({
+      id,
+      label,
+      ...(input === undefined ? {} : { input: { ...input } }),
+    })),
+  };
 }
 
 /** Reads the fixed startup catalog and adds its location to any failure. */
