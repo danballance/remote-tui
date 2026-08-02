@@ -54,7 +54,7 @@ export default function ProjectLauncher() {
       .finally(() => setLoading(false));
   }, [projectId]);
 
-  /** Ensures the selected app window exists before navigating to its terminal. */
+  /** Ensures the app window exists before opening its self-loading terminal route. */
   async function openApp(application: RemoteApp): Promise<void> {
     if (pendingAppId !== null) {
       return;
@@ -75,7 +75,7 @@ export default function ProjectLauncher() {
       });
       router.push({
         pathname: "/projects/[projectId]/apps/[appId]",
-        params: { appId: application.id, projectId, title: application.title },
+        params: { appId: application.id, projectId },
       });
     } catch (launchError) {
       console.error("[launcher] failed to launch or reconnect app", {

@@ -15,18 +15,14 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 import TerminalView, { type TerminalFrame } from "../../../../components/TerminalView";
 import {
+  getApp,
   getSnapshot,
   runRemoteAction,
-  type AppAction,
+  type RemoteApp,
+  type RemoteAppAction,
 } from "../../../../lib/agent";
 
 const REFRESH_DELAY_MS = 100;
-
-/** Human-readable confirmation displayed after each supported action. */
-const actionFeedback: Record<AppAction, string> = {
-  up: "Moved up",
-  down: "Moved down",
-};
 
 /** Waits briefly for a TUI to redraw before requesting the next snapshot. */
 function delay(milliseconds: number): Promise<void> {
@@ -78,32 +74,35 @@ function DeckButton({
   );
 }
 
-/** Displays a captured terminal frame and sends Up/Down actions to its tmux pane. */
+/** Displays a captured terminal frame and the selected app's allow-listed actions. */
 export default function AppTerminal() {
-  const { appId, projectId, title } = useLocalSearchParams<{
+  const { appId, projectId } = useLocalSearchParams<{
     appId: string;
     projectId: string;
-    title?: string;
   }>();
+  const [application, setApplication] = useState<RemoteApp | null>(null);
   const [snapshot, setSnapshot] = useState<TerminalFrame | null>(null);
-  const [pendingAction, setPendingAction] = useState<AppAction | null>(null);
+  const [pendingActionId, setPendingActionId] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Fetch canonical app metadata here so direct navigation never relies on route labels.
   useEffect(() => {
-    getSnapshot(projectId, appId)
-      .then((loadedSnapshot) => {
-        console.info("[terminal] initial snapshot loaded", {
+    Promise.all([getApp(appId), getSnapshot(projectId, appId)])
+      .then(([loadedApplication, loadedSnapshot]) => {
+        console.info("[terminal] app details and initial snapshot loaded", {
           projectId,
           appId,
+          actionCount: loadedApplication.actions.length,
           running: loadedSnapshot.running,
           columns: loadedSnapshot.columns,
           rows: loadedSnapshot.rows,
         });
+        setApplication(loadedApplication);
         setSnapshot(loadedSnapshot);
       })
       .catch((loadError: unknown) => {
-        console.error("[terminal] failed to load initial snapshot", {
+        console.error("[terminal] failed to load app details or initial snapshot", {
           projectId,
           appId,
           error: loadError,
@@ -113,43 +112,49 @@ export default function AppTerminal() {
   }, [appId, projectId]);
 
   /** Sends an action, waits for the redraw, and replaces the visible frame. */
-  async function runAction(action: AppAction): Promise<void> {
-    if (pendingAction !== null) {
+  async function runAction(action: RemoteAppAction): Promise<void> {
+    if (pendingActionId !== null) {
       return;
     }
 
-    setPendingAction(action);
+    setPendingActionId(action.id);
     setFeedback(null);
     setError(null);
-    console.info("[terminal] sending app action", { projectId, appId, action });
+    console.info("[terminal] sending app action", {
+      projectId,
+      appId,
+      actionId: action.id,
+    });
 
     try {
-      await runRemoteAction(projectId, appId, action);
+      await runRemoteAction(projectId, appId, action.id);
       await delay(REFRESH_DELAY_MS);
       const refreshedSnapshot = await getSnapshot(projectId, appId);
       setSnapshot(refreshedSnapshot);
-      setFeedback(actionFeedback[action]);
+      setFeedback(`${action.label} sent.`);
       console.info("[terminal] app action completed and snapshot refreshed", {
         projectId,
         appId,
-        action,
+        actionId: action.id,
         running: refreshedSnapshot.running,
       });
     } catch (actionError) {
       console.error("[terminal] app action failed", {
         projectId,
         appId,
-        action,
+        actionId: action.id,
         error: actionError,
       });
       setError(messageFrom(actionError));
     } finally {
-      setPendingAction(null);
+      setPendingActionId(null);
     }
   }
 
-  const controlsDisabled = pendingAction !== null || snapshot?.running !== true;
-  const appTitle = title ?? appId;
+  // Keep every configured action inert until the pane is known to be running and idle.
+  const controlsDisabled = pendingActionId !== null || snapshot?.running !== true;
+  // The route ID remains a useful heading while canonical metadata is still loading.
+  const appTitle = application?.title ?? appId;
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -202,26 +207,24 @@ export default function AppTerminal() {
           </View>
 
           <View style={styles.controls}>
-            <View style={styles.navigationRow}>
-              <View style={styles.navigationButton}>
-                <DeckButton
-                  accessibilityHint={`Moves the ${appTitle} selection up by one row`}
-                  busy={pendingAction === "up"}
-                  disabled={controlsDisabled}
-                  label="Up"
-                  onPress={() => void runAction("up")}
-                />
+            {application !== null && application.actions.length === 0 ? (
+              <Text style={styles.emptyControls}>No actions available.</Text>
+            ) : (
+              <View style={styles.actionGrid}>
+                {/* Preserve server order while the wrapping grid handles any action count. */}
+                {application?.actions.map((action) => (
+                  <View key={action.id} style={styles.actionButton}>
+                    <DeckButton
+                      accessibilityHint={`Sends ${action.label} to ${appTitle}`}
+                      busy={pendingActionId === action.id}
+                      disabled={controlsDisabled}
+                      label={action.label}
+                      onPress={() => void runAction(action)}
+                    />
+                  </View>
+                ))}
               </View>
-              <View style={styles.navigationButton}>
-                <DeckButton
-                  accessibilityHint={`Moves the ${appTitle} selection down by one row`}
-                  busy={pendingAction === "down"}
-                  disabled={controlsDisabled}
-                  label="Down"
-                  onPress={() => void runAction("down")}
-                />
-              </View>
-            </View>
+            )}
           </View>
         </ScrollView>
       </View>
@@ -304,12 +307,19 @@ const styles = StyleSheet.create({
     gap: 8,
     marginTop: "auto",
   },
-  navigationRow: {
+  actionGrid: {
     flexDirection: "row",
+    flexWrap: "wrap",
     gap: 8,
   },
-  navigationButton: {
-    flex: 1,
+  actionButton: {
+    flexBasis: "45%",
+    flexGrow: 1,
+  },
+  emptyControls: {
+    color: "#94a3b8",
+    fontSize: 14,
+    lineHeight: 20,
   },
   button: {
     minHeight: 48,

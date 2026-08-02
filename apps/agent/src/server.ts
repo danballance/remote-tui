@@ -3,7 +3,8 @@
  *
  * The HTTP API exposes persisted projects and an allow-listed application
  * catalog. Each project maps to one tmux session and each application maps to a
- * single named window whose primary pane is captured and controlled remotely.
+ * single named window whose primary pane is captured and controlled through
+ * actions defined by that application.
  */
 
 import { execFile } from "node:child_process";
@@ -32,11 +33,23 @@ const TERMINAL_ROWS = 35;
 const TERMINAL_METADATA_FORMAT =
   "#{pane_width}\t#{pane_height}\t#{cursor_x}\t#{cursor_y}\t#{cursor_flag}";
 
+/** A server-owned action exposed by ID while its tmux behavior remains private. */
+interface AppActionDefinition {
+  /** Stable route identifier, scoped to the application that owns the action. */
+  id: string;
+  /** Client-safe text used to render and announce the action button. */
+  label: string;
+  /** Arguments appended after the server-owned `send-keys -t <pane>` prefix. */
+  sendKeysArgs: readonly string[];
+}
+
 /** A server-owned application that clients may launch but may not reconfigure. */
 interface AppDefinition {
   id: string;
   title: string;
   command: string;
+  /** Ordered controls advertised to clients and resolved only within this app. */
+  actions: readonly AppActionDefinition[];
 }
 
 /** Complete terminal grid and cursor state returned to the mobile renderer. */
@@ -56,18 +69,36 @@ interface TmuxOptions {
   logResponse?: boolean;
 }
 
-/** Fixed application catalog; commands are never accepted from an HTTP client. */
+/** Fixed catalog; clients select application and action IDs but never supply commands. */
 const APP_DEFINITIONS: readonly AppDefinition[] = [
-  { id: "lazygit", title: "LazyGit", command: "exec lazygit" },
-  { id: "yazi", title: "Yazi", command: "exec yazi" },
-  { id: "pi", title: "Pi", command: "exec pi" },
+  {
+    id: "lazygit",
+    title: "LazyGit",
+    command: "exec lazygit",
+    actions: [
+      { id: "up", label: "Up", sendKeysArgs: ["Up"] },
+      { id: "down", label: "Down", sendKeysArgs: ["Down"] },
+    ],
+  },
+  {
+    id: "yazi",
+    title: "Yazi",
+    command: "exec yazi",
+    actions: [
+      { id: "up", label: "Up", sendKeysArgs: ["Up"] },
+      { id: "down", label: "Down", sendKeysArgs: ["Down"] },
+    ],
+  },
+  {
+    id: "pi",
+    title: "Pi",
+    command: "exec pi",
+    actions: [
+      { id: "up", label: "Up", sendKeysArgs: ["Up"] },
+      { id: "down", label: "Down", sendKeysArgs: ["Down"] },
+    ],
+  },
 ];
-
-/** Public action names mapped to the exact tmux key names they emit. */
-const ACTION_KEYS: Readonly<Record<string, string>> = {
-  up: "Up",
-  down: "Down",
-};
 
 const execFileAsync = promisify(execFile);
 const app = Fastify({ logger: { level: AGENT_LOG_LEVEL } });
@@ -341,6 +372,15 @@ function findApplication(appId: string): AppDefinition | undefined {
   return APP_DEFINITIONS.find((application) => application.id === appId);
 }
 
+/** Projects an app definition to client-safe metadata, preserving action order. */
+function publicApplication(application: AppDefinition) {
+  return {
+    id: application.id,
+    title: application.title,
+    actions: application.actions.map(({ id, label }) => ({ id, label })),
+  };
+}
+
 // Project routes expose the repository without leaking its JSON representation.
 app.get("/projects", async () => {
   const projects = await projectRepository.listProjects();
@@ -389,11 +429,23 @@ app.post<{ Body: { name: string; directory: string } }>(
   },
 );
 
-// The catalog deliberately omits executable command strings from the response.
+// Public catalog routes deliberately omit executable commands and tmux arguments.
 app.get("/apps", async () => {
-  const applications = APP_DEFINITIONS.map(({ id, title }) => ({ id, title }));
+  const applications = APP_DEFINITIONS.map(publicApplication);
   app.log.debug({ appCount: applications.length }, "application catalog listed");
   return applications;
+});
+
+// Detail lookup makes directly addressed terminal routes independent of navigation state.
+app.get<{ Params: { appId: string } }>("/apps/:appId", async (request, reply) => {
+  const application = findApplication(request.params.appId);
+  if (application === undefined) {
+    request.log.warn({ appId: request.params.appId }, "application not found");
+    return await reply.code(404).send();
+  }
+
+  request.log.debug({ appId: application.id }, "application retrieved");
+  return publicApplication(application);
 });
 
 // App routes translate project and app IDs into exact tmux session/window targets.
@@ -446,21 +498,24 @@ app.get<{ Params: { projectId: string; appId: string } }>(
   },
 );
 
-app.post<{ Params: { projectId: string; appId: string; action: string } }>(
-  "/projects/:projectId/apps/:appId/actions/:action",
+app.post<{ Params: { projectId: string; appId: string; actionId: string } }>(
+  "/projects/:projectId/apps/:appId/actions/:actionId",
   async (request, reply) => {
     const project = await projectRepository.getProject(request.params.projectId);
     const application = findApplication(request.params.appId);
-    const key = ACTION_KEYS[request.params.action];
-    if (project === undefined || application === undefined || key === undefined) {
+    // Resolve within the selected app so equal IDs may safely behave differently per app.
+    const action = application?.actions.find(
+      (candidate) => candidate.id === request.params.actionId,
+    );
+    if (project === undefined || application === undefined || action === undefined) {
       request.log.warn(
         {
           projectId: request.params.projectId,
           appId: request.params.appId,
-          action: request.params.action,
+          actionId: request.params.actionId,
           projectFound: project !== undefined,
           appFound: application !== undefined,
-          actionKnown: key !== undefined,
+          actionKnown: action !== undefined,
         },
         "action target not found",
       );
@@ -469,18 +524,24 @@ app.post<{ Params: { projectId: string; appId: string; action: string } }>(
 
     if (!(await appWindowExists(project, application))) {
       request.log.warn(
-        { projectId: project.id, appId: application.id, action: request.params.action },
+        { projectId: project.id, appId: application.id, actionId: action.id },
         "action requested for a stopped app",
       );
       return await reply.code(404).send();
     }
 
-    await tmux("send-keys", "-t", paneTarget(project, application), key);
+    // The route selects only configured suffix arguments; the command and pane stay private.
+    await tmux(
+      "send-keys",
+      "-t",
+      paneTarget(project, application),
+      ...action.sendKeysArgs,
+    );
     request.log.info(
       {
         projectId: project.id,
         appId: application.id,
-        action: request.params.action,
+        actionId: action.id,
         target: paneTarget(project, application),
       },
       "app action sent",

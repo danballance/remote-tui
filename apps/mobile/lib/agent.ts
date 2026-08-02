@@ -16,14 +16,21 @@ export interface Project {
   directory: string;
 }
 
-/** Public catalog entry; executable commands remain private to the agent. */
+/** Client-safe action metadata used for route selection and button rendering. */
+export interface RemoteAppAction {
+  /** Stable identifier sent back to the app-scoped action route. */
+  id: string;
+  /** Agent-provided text displayed and announced by the mobile control. */
+  label: string;
+}
+
+/** Public catalog entry; executable commands and tmux arguments stay on the agent. */
 export interface RemoteApp {
   id: string;
   title: string;
+  /** Controls appear in this agent-defined order on the terminal screen. */
+  actions: RemoteAppAction[];
 }
-
-/** Small allow-list of terminal actions currently exposed by the mobile UI. */
-export type AppAction = "up" | "down";
 
 /** Executes one agent request and records transport-level diagnostics. */
 async function request(path: string, init?: RequestInit): Promise<Response> {
@@ -84,10 +91,16 @@ export async function createProject(
   return (await response.json()) as Project;
 }
 
-/** Lists applications that the desktop agent allows clients to launch. */
+/** Lists launchable applications with each app's ordered public actions. */
 export async function listApps(): Promise<RemoteApp[]> {
   const response = await request("/apps");
   return (await response.json()) as RemoteApp[];
+}
+
+/** Retrieves canonical metadata for a directly addressed terminal screen. */
+export async function getApp(appId: string): Promise<RemoteApp> {
+  const response = await request(`/apps/${appId}`);
+  return (await response.json()) as RemoteApp;
 }
 
 /** Creates an app window or reconnects to the existing window without restarting it. */
@@ -104,13 +117,13 @@ export async function getSnapshot(
   return (await response.json()) as TerminalFrame;
 }
 
-/** Sends one allow-listed key action to the app window's primary pane. */
+/** Requests an app-owned action; the agent resolves its private tmux arguments. */
 export async function runRemoteAction(
   projectId: string,
   appId: string,
-  action: AppAction,
+  actionId: string,
 ): Promise<void> {
-  await request(`/projects/${projectId}/apps/${appId}/actions/${action}`, {
+  await request(`/projects/${projectId}/apps/${appId}/actions/${actionId}`, {
     method: "POST",
   });
 }
