@@ -1,41 +1,16 @@
-/**
- * Remote Deck's desktop agent.
- *
- * The HTTP API exposes persisted projects and an allow-listed application
- * catalog. Each project maps to one tmux session and each application maps to a
- * single named window whose primary pane is captured and controlled through
- * actions loaded from the server-owned YAML catalog at startup.
- */
+/** Production composition root for the Remote Deck desktop agent. */
 
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import Fastify from "fastify";
-
-import {
-  executeAppAction,
-  InvalidActionRequestError,
-  PaneActionQueue,
-  parseActionRequestInput,
-} from "./actions.js";
+import { createAgentApp, type TmuxExecutor } from "./app.js";
 import {
   APPLICATION_CATALOG_PATH,
   loadApplicationCatalog,
-  publicApplication,
-  type AppDefinition,
 } from "./applications.js";
-import {
-  createJsonProjectRepository,
-  type Project,
-  type ProjectRepository,
-} from "./projects.js";
-import {
-  privateInputLogCommand,
-  privateTmuxFailureError,
-  privateTmuxFailureStatus,
-} from "./tmux-privacy.js";
+import { createJsonProjectRepository } from "./projects.js";
 
 const AGENT_HOST = "192.168.86.75";
 const AGENT_PORT = 43_820;
@@ -44,556 +19,53 @@ const AGENT_LOG_LEVEL = process.env.REMOTE_DECK_LOG_LEVEL ?? "info";
 const PROJECT_STORE_PATH = fileURLToPath(
   new URL("../.data/projects.json", import.meta.url),
 );
-const SESSION_PREFIX = "remote-deck-";
-const TERMINAL_COLUMNS = 120;
-const TERMINAL_ROWS = 35;
-const TERMINAL_METADATA_FORMAT =
-  "#{pane_width}\t#{pane_height}\t#{cursor_x}\t#{cursor_y}\t#{cursor_flag}";
-
-/** Complete terminal grid and cursor state returned to the mobile renderer. */
-interface TerminalFrame {
-  running: boolean;
-  columns: number;
-  rows: number;
-  ansi: string;
-  cursorX: number;
-  cursorY: number;
-  cursorVisible: boolean;
-}
-
-/** Controls how a tmux subprocess is represented in structured logs. */
-interface TmuxOptions {
-  logFailureAsDebug?: boolean;
-  logResponse?: boolean;
-  /** Prevents private argv and child-process errors from reaching structured logs. */
-  sensitive?: boolean;
-  /** Safe command representation used instead of the actual sensitive argv. */
-  loggedCommand?: readonly string[];
-}
 
 const execFileAsync = promisify(execFile);
-const app = Fastify({ logger: { level: AGENT_LOG_LEVEL } });
-const paneActionQueue = new PaneActionQueue();
 
-/** Loads the complete command allow-list before any HTTP routes can be served. */
-async function openApplicationCatalog(): Promise<readonly AppDefinition[]> {
-  try {
-    const applications = await loadApplicationCatalog();
-    app.log.info(
-      {
-        applicationCatalogPath: APPLICATION_CATALOG_PATH,
-        appCount: applications.length,
-      },
-      "application catalog loaded",
-    );
-    return applications;
-  } catch (error) {
-    app.log.fatal(
-      { err: error, applicationCatalogPath: APPLICATION_CATALOG_PATH },
-      "failed to load application catalog",
-    );
-    throw error;
-  }
-}
+/** Executes tmux directly, never through a shell. */
+const executeTmux: TmuxExecutor = async (arguments_) => {
+  const { stdout, stderr } = await execFileAsync("tmux", [...arguments_], {
+    encoding: "utf8",
+  });
+  return { stdout, stderr };
+};
 
-const APP_DEFINITIONS = await openApplicationCatalog();
+async function startAgent(): Promise<void> {
+  const applications = await loadApplicationCatalog();
+  const projectRepository = await createJsonProjectRepository(PROJECT_STORE_PATH);
+  const app = createAgentApp({
+    applications,
+    projectRepository,
+    createProjectId: randomUUID,
+    executeTmux,
+    logLevel: AGENT_LOG_LEVEL,
+  });
 
-/** Extracts child-process output from an unknown error for safe structured logging. */
-function commandResponse(error: unknown): { stdout: unknown; stderr: unknown } {
-  if (typeof error !== "object" || error === null) {
-    return { stdout: undefined, stderr: undefined };
-  }
-
-  return {
-    stdout: "stdout" in error ? error.stdout : undefined,
-    stderr: "stderr" in error ? error.stderr : undefined,
-  };
-}
-
-/**
- * Runs tmux without a shell and logs the exact argument vector.
- *
- * Terminal captures opt out of response logging so terminal contents never
- * enter logs. Expected probe failures can be demoted to debug level.
- */
-async function runTmux(args: string[], options: TmuxOptions = {}): Promise<string> {
-  const command = ["tmux", ...args];
-  const loggedCommand =
-    options.sensitive === true
-      ? (options.loggedCommand ?? ["tmux", args[0] ?? "command", "[REDACTED]"])
-      : command;
-  const logResponse = options.logResponse ?? true;
-
-  try {
-    const { stdout, stderr } = await execFileAsync("tmux", args, { encoding: "utf8" });
-    const response =
-      options.sensitive === true
-        ? undefined
-        : logResponse
-          ? { stdout, stderr }
-          : { stderr };
-    app.log.debug({ command: loggedCommand, response }, "tmux command completed");
-    return stdout;
-  } catch (error) {
-    if (options.sensitive === true) {
-      app.log.error(
-        { command: loggedCommand, failure: privateTmuxFailureStatus(error) },
-        "sensitive tmux command failed",
-      );
-      // Do not attach the child error: Node includes the original argv in its message.
-      throw privateTmuxFailureError();
-    }
-
-    const response = commandResponse(error);
-    const context = {
-      ...(logResponse && !options.logFailureAsDebug && { err: error }),
-      command: loggedCommand,
-      response: logResponse ? response : { stderr: response.stderr },
-    };
-
-    if (options.logFailureAsDebug === true) {
-      app.log.debug(context, "tmux probe did not find its target");
-    } else {
-      app.log.error(context, "tmux command failed");
-    }
-    throw error;
-  }
-}
-
-/** Convenience wrapper for tmux commands whose failures are operational errors. */
-async function tmux(...args: string[]): Promise<string> {
-  return await runTmux(args);
-}
-
-/** Derives the private tmux session name owned by a project. */
-function sessionName(project: Project): string {
-  return `${SESSION_PREFIX}${project.id}`;
-}
-
-/** Targets the single primary pane in an application's named tmux window. */
-function paneTarget(project: Project, application: AppDefinition): string {
-  return `${sessionName(project)}:${application.id}.0`;
-}
-
-/** Checks whether the project's lazily created tmux session currently exists. */
-async function sessionExists(project: Project): Promise<boolean> {
-  const session = sessionName(project);
-  try {
-    await runTmux(["has-session", "-t", session], {
-      logFailureAsDebug: true,
-      logResponse: false,
-    });
-    app.log.debug({ projectId: project.id, session, exists: true }, "tmux session checked");
-    return true;
-  } catch {
-    app.log.debug({ projectId: project.id, session, exists: false }, "tmux session checked");
-    return false;
-  }
-}
-
-/** Checks exact window names to avoid tmux falling back to the current window. */
-async function appWindowExists(
-  project: Project,
-  application: AppDefinition,
-): Promise<boolean> {
-  if (!(await sessionExists(project))) {
-    app.log.debug(
-      { projectId: project.id, appId: application.id, exists: false },
-      "app window checked without a project session",
-    );
-    return false;
-  }
-
-  const windowNames = await tmux(
-    "list-windows",
-    "-t",
-    sessionName(project),
-    "-F",
-    "#{window_name}",
-  );
-  const exists = windowNames.trimEnd().split("\n").includes(application.id);
-  app.log.debug(
-    { projectId: project.id, appId: application.id, exists },
-    "app window checked",
-  );
-  return exists;
-}
-
-/**
- * Ensures one persistent window exists for an application.
- *
- * The first application creates the session and its first window. Later
- * applications create sibling windows; an existing window is reused unchanged.
- */
-async function ensureAppWindow(
-  project: Project,
-  application: AppDefinition,
-): Promise<void> {
-  if (await appWindowExists(project, application)) {
-    app.log.info(
-      {
-        projectId: project.id,
-        appId: application.id,
-        session: sessionName(project),
-        target: paneTarget(project, application),
-      },
-      "reusing existing app window",
-    );
-    return;
-  }
-
-  const projectSession = sessionName(project);
-  if (!(await sessionExists(project))) {
-    await tmux(
-      "new-session",
-      "-d",
-      "-x",
-      String(TERMINAL_COLUMNS),
-      "-y",
-      String(TERMINAL_ROWS),
-      "-s",
-      projectSession,
-      "-n",
-      application.id,
-      "-c",
-      project.directory,
-      application.command,
-    );
-    app.log.info(
-      {
-        projectId: project.id,
-        appId: application.id,
-        directory: project.directory,
-        session: projectSession,
-        target: paneTarget(project, application),
-      },
-      "created project session with its first app window",
-    );
-    return;
-  }
-
-  await tmux(
-    "new-window",
-    "-d",
-    "-t",
-    projectSession,
-    "-n",
-    application.id,
-    "-c",
-    project.directory,
-    application.command,
+  app.log.info(
+    {
+      applicationCatalogPath: APPLICATION_CATALOG_PATH,
+      appCount: applications.length,
+    },
+    "application catalog loaded",
   );
   app.log.info(
     {
-      projectId: project.id,
-      appId: application.id,
-      directory: project.directory,
-      session: projectSession,
-      target: paneTarget(project, application),
+      projectStorePath: PROJECT_STORE_PATH,
+      projectCount: (await projectRepository.listProjects()).length,
     },
-    "created app window in existing project session",
+    "project repository opened",
   );
-}
 
-/** Returns the stable empty frame used when an app window is not running. */
-function stoppedFrame(): TerminalFrame {
-  return {
-    running: false,
-    columns: TERMINAL_COLUMNS,
-    rows: TERMINAL_ROWS,
-    ansi: "",
-    cursorX: 0,
-    cursorY: 0,
-    cursorVisible: false,
-  };
-}
-
-/** Captures one app pane without ever writing its terminal contents to logs. */
-async function captureApp(
-  project: Project,
-  application: AppDefinition,
-): Promise<TerminalFrame> {
-  if (!(await appWindowExists(project, application))) {
-    app.log.debug(
-      { projectId: project.id, appId: application.id, running: false },
-      "terminal snapshot requested for a stopped app",
-    );
-    return stoppedFrame();
-  }
-
-  const target = paneTarget(project, application);
-  const ansi = await runTmux(["capture-pane", "-p", "-e", "-N", "-t", target], {
-    logResponse: false,
-  });
-  const metadata = await tmux(
-    "display-message",
-    "-p",
-    "-t",
-    target,
-    TERMINAL_METADATA_FORMAT,
-  );
-  const metadataFields = metadata.trimEnd().split("\t");
-
-  const frame: TerminalFrame = {
-    running: true,
-    columns: Number(metadataFields[0]),
-    rows: Number(metadataFields[1]),
-    ansi: ansi.replace(/\n$/, ""),
-    cursorX: Number(metadataFields[2]),
-    cursorY: Number(metadataFields[3]),
-    cursorVisible: Number(metadataFields[4]) === 1,
-  };
-  app.log.debug(
-    {
-      projectId: project.id,
-      appId: application.id,
-      target,
-      columns: frame.columns,
-      rows: frame.rows,
-      cursorX: frame.cursorX,
-      cursorY: frame.cursorY,
-      cursorVisible: frame.cursorVisible,
-    },
-    "terminal snapshot captured",
-  );
-  return frame;
-}
-
-/** Opens project persistence and records enough startup context to diagnose failures. */
-async function openProjectRepository(): Promise<ProjectRepository> {
-  try {
-    const repository = await createJsonProjectRepository(PROJECT_STORE_PATH);
-    const projects = await repository.listProjects();
-    app.log.info(
-      { projectStorePath: PROJECT_STORE_PATH, projectCount: projects.length },
-      "project repository opened",
-    );
-    return repository;
-  } catch (error) {
-    app.log.fatal(
-      { err: error, projectStorePath: PROJECT_STORE_PATH },
-      "failed to open project repository",
-    );
-    throw error;
-  }
-}
-
-const projectRepository = await openProjectRepository();
-
-/** Resolves an allow-listed application definition from a public app ID. */
-function findApplication(appId: string): AppDefinition | undefined {
-  return APP_DEFINITIONS.find((application) => application.id === appId);
-}
-
-// Project routes expose the repository without leaking its JSON representation.
-app.get("/projects", async () => {
-  const projects = await projectRepository.listProjects();
-  app.log.debug({ projectCount: projects.length }, "projects listed");
-  return projects;
-});
-
-app.get<{ Params: { projectId: string } }>(
-  "/projects/:projectId",
-  async (request, reply) => {
-    const project = await projectRepository.getProject(request.params.projectId);
-    if (project === undefined) {
-      request.log.warn({ projectId: request.params.projectId }, "project not found");
-      return await reply.code(404).send();
-    }
-
-    request.log.debug({ projectId: project.id }, "project retrieved");
-    return project;
-  },
-);
-
-app.post<{ Body: { name: string; directory: string } }>(
-  "/projects",
-  async (request, reply) => {
-    const project: Project = {
-      id: randomUUID(),
-      name: request.body.name,
-      directory: request.body.directory,
-    };
-
-    try {
-      await projectRepository.addProject(project);
-    } catch (error) {
-      request.log.error(
-        { err: error, projectId: project.id, directory: project.directory },
-        "failed to persist project",
-      );
-      throw error;
-    }
-
-    request.log.info(
-      { projectId: project.id, name: project.name, directory: project.directory },
-      "project created",
-    );
-    return await reply.code(201).send(project);
-  },
-);
-
-// Public catalog routes deliberately omit executable commands and tmux arguments.
-app.get("/apps", async () => {
-  const applications = APP_DEFINITIONS.map(publicApplication);
-  app.log.debug({ appCount: applications.length }, "application catalog listed");
-  return applications;
-});
-
-// Detail lookup makes directly addressed terminal routes independent of navigation state.
-app.get<{ Params: { appId: string } }>("/apps/:appId", async (request, reply) => {
-  const application = findApplication(request.params.appId);
-  if (application === undefined) {
-    request.log.warn({ appId: request.params.appId }, "application not found");
-    return await reply.code(404).send();
-  }
-
-  request.log.debug({ appId: application.id }, "application retrieved");
-  return publicApplication(application);
-});
-
-// App routes translate project and app IDs into exact tmux session/window targets.
-app.post<{ Params: { projectId: string; appId: string } }>(
-  "/projects/:projectId/apps/:appId/launch",
-  async (request, reply) => {
-    const project = await projectRepository.getProject(request.params.projectId);
-    const application = findApplication(request.params.appId);
-    if (project === undefined || application === undefined) {
-      request.log.warn(
-        {
-          projectId: request.params.projectId,
-          appId: request.params.appId,
-          projectFound: project !== undefined,
-          appFound: application !== undefined,
-        },
-        "app launch target not found",
-      );
-      return await reply.code(404).send();
-    }
-
-    request.log.info(
-      { projectId: project.id, appId: application.id },
-      "app launch requested",
-    );
-    await ensureAppWindow(project, application);
-    return await reply.code(204).send();
-  },
-);
-
-app.get<{ Params: { projectId: string; appId: string } }>(
-  "/projects/:projectId/apps/:appId/snapshot",
-  async (request, reply) => {
-    const project = await projectRepository.getProject(request.params.projectId);
-    const application = findApplication(request.params.appId);
-    if (project === undefined || application === undefined) {
-      request.log.warn(
-        {
-          projectId: request.params.projectId,
-          appId: request.params.appId,
-          projectFound: project !== undefined,
-          appFound: application !== undefined,
-        },
-        "snapshot target not found",
-      );
-      return await reply.code(404).send();
-    }
-
-    return await captureApp(project, application);
-  },
-);
-
-app.post<{
-  Params: { projectId: string; appId: string; actionId: string };
-  Body: unknown;
-}>(
-  "/projects/:projectId/apps/:appId/actions/:actionId",
-  async (request, reply) => {
-    const project = await projectRepository.getProject(request.params.projectId);
-    const application = findApplication(request.params.appId);
-    // Resolve within the selected app so equal IDs may safely behave differently per app.
-    const action = application?.actions.find(
-      (candidate) => candidate.id === request.params.actionId,
-    );
-    if (project === undefined || application === undefined || action === undefined) {
-      request.log.warn(
-        {
-          projectId: request.params.projectId,
-          appId: request.params.appId,
-          actionId: request.params.actionId,
-          projectFound: project !== undefined,
-          appFound: application !== undefined,
-          actionKnown: action !== undefined,
-        },
-        "action target not found",
-      );
-      return await reply.code(404).send();
-    }
-
-    let actionInput: string | undefined;
-    try {
-      actionInput = parseActionRequestInput(action, request.body);
-    } catch (error) {
-      if (!(error instanceof InvalidActionRequestError)) {
-        throw error;
-      }
-      request.log.warn(
-        {
-          projectId: project.id,
-          appId: application.id,
-          actionId: action.id,
-          reason: error.message,
-        },
-        "invalid app action request",
-      );
-      return await reply.code(400).send();
-    }
-
-    if (!(await appWindowExists(project, application))) {
-      request.log.warn(
-        { projectId: project.id, appId: application.id, actionId: action.id },
-        "action requested for a stopped app",
-      );
-      return await reply.code(404).send();
-    }
-
-    const target = paneTarget(project, application);
-    await paneActionQueue.run(target, async () => {
-      await executeAppAction(
-        action,
-        actionInput,
-        async (_phase, arguments_, options) => {
-          if (!options.literal) {
-            await tmux("send-keys", "-t", target, ...arguments_);
-            return;
-          }
-
-          await runTmux(["send-keys", "-t", target, "-l", "--", ...arguments_], {
-            sensitive: options.sensitive,
-            loggedCommand: privateInputLogCommand(target),
-          });
-        },
-      );
-    });
-    request.log.info(
-      {
-        projectId: project.id,
-        appId: application.id,
-        actionId: action.id,
-        target,
-      },
-      "app action sent",
-    );
-    return await reply.code(204).send();
-  },
-);
-
-try {
   const address = await app.listen({ host: AGENT_HOST, port: AGENT_PORT });
   app.log.info(
     { address, host: AGENT_HOST, port: AGENT_PORT, logLevel: AGENT_LOG_LEVEL },
     "Remote Deck agent started",
   );
+}
+
+try {
+  await startAgent();
 } catch (error) {
-  app.log.fatal({ err: error, host: AGENT_HOST, port: AGENT_PORT }, "agent failed to start");
+  console.error("Remote Deck agent failed to start", error);
   process.exitCode = 1;
 }
