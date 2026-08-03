@@ -1,17 +1,18 @@
 /** Read-only terminal and allow-listed controls for one project application. */
 
-import { router, useLocalSearchParams } from "expo-router";
+import { router, Stack, useLocalSearchParams } from "expo-router";
 import { StatusBar } from "expo-status-bar";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
+  BackHandler,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 
 import ActionInputModal, {
   type RemoteTextInputAction,
@@ -90,6 +91,8 @@ export default function AppTerminal() {
   const [inputDraft, setInputDraft] = useState("");
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [terminalExpanded, setTerminalExpanded] = useState(false);
+  const safeAreaInsets = useSafeAreaInsets();
 
   // Fetch canonical app metadata here so direct navigation never relies on route labels.
   useEffect(() => {
@@ -115,6 +118,36 @@ export default function AppTerminal() {
         setError(messageFrom(loadError));
       });
   }, [appId, projectId]);
+
+  /** Lets Android back restore the split layout before navigating away. */
+  useEffect(() => {
+    if (!terminalExpanded) {
+      return;
+    }
+
+    const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
+      console.info("[terminal] Android back collapsed the expanded terminal", {
+        projectId,
+        appId,
+      });
+      setTerminalExpanded(false);
+      return true;
+    });
+    return () => subscription.remove();
+  }, [appId, projectId, terminalExpanded]);
+
+  /** Receives expand/collapse requests from the xterm DOM component. */
+  const handleTerminalExpandedChange = useCallback(
+    async (expanded: boolean): Promise<void> => {
+      console.info("[terminal] terminal display mode changed", {
+        projectId,
+        appId,
+        expanded,
+      });
+      setTerminalExpanded(expanded);
+    },
+    [appId, projectId],
+  );
 
   /** Sends an action and refreshes the terminal even when execution fails partway. */
   async function runAction(action: RemoteAppAction, input?: string): Promise<void> {
@@ -215,8 +248,17 @@ export default function AppTerminal() {
   const appTitle = application?.title ?? appId;
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <StatusBar style="light" />
+    <SafeAreaView
+      edges={terminalExpanded ? [] : ["top", "right", "bottom", "left"]}
+      style={styles.safeArea}
+    >
+      <Stack.Screen
+        options={{
+          navigationBarHidden: terminalExpanded,
+          statusBarHidden: terminalExpanded,
+        }}
+      />
+      <StatusBar hidden={terminalExpanded} style="light" />
       <ActionInputModal
         action={inputAction}
         onCancel={cancelActionInput}
@@ -224,8 +266,8 @@ export default function AppTerminal() {
         onSubmit={submitActionInput}
         value={inputDraft}
       />
-      <View style={styles.page}>
-        <View style={styles.terminal}>
+      <View style={[styles.page, terminalExpanded && styles.pageExpanded]}>
+        <View style={[styles.terminal, terminalExpanded && styles.terminalExpanded]}>
           {snapshot === null ? (
             <Text style={styles.terminalMessage}>
               {error === null ? "Loading…" : "Snapshot unavailable."}
@@ -233,69 +275,77 @@ export default function AppTerminal() {
           ) : snapshot.running ? (
             <TerminalView
               dom={{ scrollEnabled: true, style: styles.terminalWebView }}
+              expanded={terminalExpanded}
               frame={snapshot}
+              onExpandedChange={handleTerminalExpandedChange}
+              safeAreaInsets={safeAreaInsets}
             />
           ) : (
             <Text style={styles.terminalMessage}>{appTitle} is not running.</Text>
           )}
         </View>
 
-        <ScrollView
-          contentContainerStyle={styles.controlRailContent}
-          showsVerticalScrollIndicator={false}
-          style={styles.controlRail}
-        >
-          <Pressable
-            accessibilityHint="Returns to this project's app launcher"
-            accessibilityLabel="Back to apps"
-            accessibilityRole="button"
-            onPress={() => router.back()}
-            style={({ pressed }) => [styles.backButton, pressed && styles.backButtonPressed]}
+        {terminalExpanded ? null : (
+          <ScrollView
+            contentContainerStyle={styles.controlRailContent}
+            showsVerticalScrollIndicator={false}
+            style={styles.controlRail}
           >
-            <Text style={styles.backButtonText}>Apps</Text>
-          </Pressable>
-          <Text accessibilityRole="header" numberOfLines={1} style={styles.title}>
-            {appTitle}
-          </Text>
+            <Pressable
+              accessibilityHint="Returns to this project's app launcher"
+              accessibilityLabel="Back to apps"
+              accessibilityRole="button"
+              onPress={() => router.back()}
+              style={({ pressed }) => [
+                styles.backButton,
+                pressed && styles.backButtonPressed,
+              ]}
+            >
+              <Text style={styles.backButtonText}>Apps</Text>
+            </Pressable>
+            <Text accessibilityRole="header" numberOfLines={1} style={styles.title}>
+              {appTitle}
+            </Text>
 
-          <View style={styles.messages}>
-            {feedback === null ? null : (
-              <Text accessibilityLiveRegion="polite" style={styles.feedback}>
-                {feedback}
-              </Text>
-            )}
-            {error === null ? null : (
-              <Text accessibilityLiveRegion="assertive" style={styles.error}>
-                {error}
-              </Text>
-            )}
-          </View>
+            <View style={styles.messages}>
+              {feedback === null ? null : (
+                <Text accessibilityLiveRegion="polite" style={styles.feedback}>
+                  {feedback}
+                </Text>
+              )}
+              {error === null ? null : (
+                <Text accessibilityLiveRegion="assertive" style={styles.error}>
+                  {error}
+                </Text>
+              )}
+            </View>
 
-          <View style={styles.controls}>
-            {application !== null && application.actions.length === 0 ? (
-              <Text style={styles.emptyControls}>No actions available.</Text>
-            ) : (
-              <View style={styles.actionGrid}>
-                {/* Preserve server order while the wrapping grid handles any action count. */}
-                {application?.actions.map((action) => (
-                  <View key={action.id} style={styles.actionButton}>
-                    <DeckButton
-                      accessibilityHint={
-                        action.input === undefined
-                          ? `Sends ${action.label} to ${appTitle}`
-                          : `Opens text input for ${action.label}`
-                      }
-                      busy={pendingActionId === action.id}
-                      disabled={controlsDisabled}
-                      label={action.label}
-                      onPress={() => handleActionPress(action)}
-                    />
-                  </View>
-                ))}
-              </View>
-            )}
-          </View>
-        </ScrollView>
+            <View style={styles.controls}>
+              {application !== null && application.actions.length === 0 ? (
+                <Text style={styles.emptyControls}>No actions available.</Text>
+              ) : (
+                <View style={styles.actionGrid}>
+                  {/* Preserve server order while the wrapping grid handles any action count. */}
+                  {application?.actions.map((action) => (
+                    <View key={action.id} style={styles.actionButton}>
+                      <DeckButton
+                        accessibilityHint={
+                          action.input === undefined
+                            ? `Sends ${action.label} to ${appTitle}`
+                            : `Opens text input for ${action.label}`
+                        }
+                        busy={pendingActionId === action.id}
+                        disabled={controlsDisabled}
+                        label={action.label}
+                        onPress={() => handleActionPress(action)}
+                      />
+                    </View>
+                  ))}
+                </View>
+              )}
+            </View>
+          </ScrollView>
+        )}
       </View>
     </SafeAreaView>
   );
@@ -312,6 +362,10 @@ const styles = StyleSheet.create({
     gap: 8,
     padding: 4,
   },
+  pageExpanded: {
+    gap: 0,
+    padding: 0,
+  },
   terminal: {
     flex: 1,
     minWidth: 0,
@@ -319,6 +373,10 @@ const styles = StyleSheet.create({
     backgroundColor: "#020617",
     overflow: "hidden",
     padding: 4,
+  },
+  terminalExpanded: {
+    borderRadius: 0,
+    padding: 0,
   },
   terminalWebView: {
     flex: 1,

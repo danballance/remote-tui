@@ -13,6 +13,7 @@
     "moduleResolution": "Bundler",
     "noEmit": true,
     "types": [
+      "node",
       "react",
       "react-native"
     ]
@@ -21,6 +22,7 @@
     "app/**/*.tsx",
     "components/**/*.tsx",
     "lib/**/*.ts",
+    "test/**/*.ts",
     "expo-env.d.ts",
     ".expo/types/**/*.ts"
   ]
