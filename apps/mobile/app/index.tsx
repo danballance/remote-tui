@@ -14,11 +14,9 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
-import {
-  createProject as createRemoteProject,
-  listProjects,
-  type Project,
-} from "../lib/agent";
+import type { Project } from "@remote-deck/contracts";
+
+import { useAgentClient } from "../lib/AgentClientProvider";
 
 /** Converts caught values into concise messages suitable for the visible error area. */
 function messageFrom(error: unknown): string {
@@ -27,6 +25,7 @@ function messageFrom(error: unknown): string {
 
 /** Lists persisted projects and registers new name/directory pairs. */
 export default function Index() {
+  const agentClient = useAgentClient();
   const [projects, setProjects] = useState<Project[]>([]);
   const [name, setName] = useState("");
   const [directory, setDirectory] = useState("");
@@ -35,21 +34,18 @@ export default function Index() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    listProjects()
-      .then((loadedProjects) => {
-        console.info("[projects] project list loaded", { count: loadedProjects.length });
-        setProjects(loadedProjects);
-      })
+    agentClient
+      .listProjects()
+      .then(setProjects)
       .catch((loadError: unknown) => {
         console.error("[projects] failed to load project list", { error: loadError });
         setError(messageFrom(loadError));
       })
       .finally(() => setLoading(false));
-  }, []);
+  }, [agentClient]);
 
   /** Navigates from the project list to one project's application launcher. */
   function openProject(projectId: string): void {
-    console.info("[projects] opening project", { projectId });
     router.push({ pathname: "/projects/[projectId]", params: { projectId } });
   }
 
@@ -64,7 +60,10 @@ export default function Index() {
     console.info("[projects] creating project", { name: name.trim() });
 
     try {
-      const project = await createRemoteProject(name.trim(), directory.trim());
+      const project = await agentClient.createProject(
+        name.trim(),
+        directory.trim(),
+      );
       console.info("[projects] project created", { projectId: project.id });
       setProjects((currentProjects) => [...currentProjects, project]);
       setName("");

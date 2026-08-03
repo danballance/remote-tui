@@ -12,12 +12,12 @@ import {
 } from "react-native";
 
 import type {
-  RemoteAppAction,
-  RemoteAppActionTextInput,
-} from "../lib/agent";
+  ApplicationActionTextInput,
+  PublicApplicationAction,
+} from "@remote-deck/contracts";
 
-export type RemoteTextInputAction = RemoteAppAction & {
-  input: RemoteAppActionTextInput;
+export type RemoteTextInputAction = PublicApplicationAction & {
+  input: ApplicationActionTextInput;
 };
 
 interface ActionInputModalProps {

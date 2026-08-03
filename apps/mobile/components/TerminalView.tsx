@@ -9,26 +9,9 @@ import { Terminal } from "@xterm/xterm";
 import { useCallback, useEffect, useRef, type CSSProperties } from "react";
 
 import type { MobileTerminalConfig } from "@remote-deck/config/mobile";
+import type { TerminalFrame } from "@remote-deck/contracts";
 
 import { widthFittedFontSize } from "./terminalSizing";
-
-/** Serializable terminal state needed to reproduce one captured tmux pane. */
-export interface TerminalFrame {
-  /** Whether the target app window currently exists. */
-  running: boolean;
-  /** Current pane width in terminal cells. */
-  columns: number;
-  /** Current pane height in terminal cells. */
-  rows: number;
-  /** Full pane contents including ANSI styling sequences. */
-  ansi: string;
-  /** Zero-based cursor column. */
-  cursorX: number;
-  /** Zero-based cursor row. */
-  cursorY: number;
-  /** Whether xterm should display the cursor. */
-  cursorVisible: boolean;
-}
 
 /** Props passed through Expo's DOM component bridge. */
 interface TerminalViewProps {
@@ -118,10 +101,6 @@ export default function TerminalView({
             left: 0,
             top: resetScroll ? 0 : previousScrollTop,
           });
-          console.debug("[terminal-view] width fit applied", {
-            columns: frameColumnsRef.current,
-            fontSize,
-          });
         });
       };
 
@@ -190,13 +169,8 @@ export default function TerminalView({
     const resizeObserver = new ResizeObserver(() => scheduleTerminalSizing(false));
     resizeObserver.observe(containerRef.current);
     void document.fonts.ready.then(() => scheduleTerminalSizing(false));
-    console.info("[terminal-view] xterm renderer opened", {
-      columns,
-      rows,
-    });
 
     return () => {
-      console.info("[terminal-view] xterm renderer disposed");
       resizeObserver.disconnect();
       sizingGenerationRef.current += 1;
       if (sizingFrameRef.current !== null) {
@@ -220,14 +194,6 @@ export default function TerminalView({
     terminal.resize(frame.columns, frame.rows);
     terminal.reset();
     terminal.write(`\u001b[2J\u001b[H${frame.ansi}${cursorPosition}${cursorVisibility}`);
-    console.debug("[terminal-view] frame rendered", {
-      running: frame.running,
-      columns: frame.columns,
-      rows: frame.rows,
-      cursorX: frame.cursorX,
-      cursorY: frame.cursorY,
-      cursorVisible: frame.cursorVisible,
-    });
   }, [frame]);
 
   useEffect(() => {

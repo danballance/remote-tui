@@ -5,15 +5,19 @@ import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-import { loadConfig, type RemoteDeckConfig } from "@remote-deck/config";
-import type { FastifyInstance } from "fastify";
+import { remoteDeckConfig, type RemoteDeckConfig } from "@remote-deck/config";
+import Fastify, { type FastifyInstance } from "fastify";
 
-import { createAgentApp, type TmuxExecutor } from "./app.js";
-import { loadApplicationCatalog, type AppDefinition } from "./applications.js";
+import { createAgentApp } from "./app.js";
+import { createApplicationCatalog } from "./applications.js";
 import {
   createJsonProjectRepository,
   type ProjectRepository,
 } from "./projects.js";
+import {
+  TmuxApplicationRuntime,
+  type TmuxExecutor,
+} from "./runtime.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -27,7 +31,6 @@ const executeTmux: TmuxExecutor = async (arguments_) => {
 
 /** Injectable startup dependencies used by production and composition tests. */
 export interface AgentServerDependencies {
-  loadApplications(path: string): Promise<readonly AppDefinition[]>;
   openProjectRepository(path: string): Promise<ProjectRepository>;
   createProjectId(): string;
   executeTmux: TmuxExecutor;
@@ -38,45 +41,42 @@ export interface AgentServerDependencies {
 }
 
 const productionDependencies: AgentServerDependencies = {
-  loadApplications: loadApplicationCatalog,
   openProjectRepository: createJsonProjectRepository,
   createProjectId: randomUUID,
   executeTmux,
   listen: async (app, options) => await app.listen(options),
 };
 
-/** Composes and starts the agent from one already validated configuration value. */
+/** Composes and starts the agent from trusted typed settings. */
 export async function startAgent(
   config: RemoteDeckConfig,
   dependencies: AgentServerDependencies = productionDependencies,
 ): Promise<FastifyInstance> {
-  const applications = await dependencies.loadApplications(
-    config.agent.applicationCatalogPath,
-  );
   const projectRepository = await dependencies.openProjectRepository(
     config.agent.projectStorePath,
   );
+  const applicationCatalog = createApplicationCatalog();
+  const server = Fastify({ logger: { level: config.agent.logLevel } });
+  const applicationRuntime = new TmuxApplicationRuntime(
+    config.tmux,
+    dependencies.executeTmux,
+    server.log,
+  );
   const app = createAgentApp({
-    applications,
-    config,
+    applicationCatalog,
+    applicationRuntime,
     projectRepository,
     createProjectId: dependencies.createProjectId,
-    executeTmux: dependencies.executeTmux,
+    server,
   });
 
   app.log.info(
     {
-      applicationCatalogPath: config.agent.applicationCatalogPath,
-      appCount: applications.length,
-    },
-    "application catalog loaded",
-  );
-  app.log.info(
-    {
+      appCount: applicationCatalog.listApplications().length,
       projectStorePath: config.agent.projectStorePath,
       projectCount: (await projectRepository.listProjects()).length,
     },
-    "project repository opened",
+    "agent resources ready",
   );
 
   const address = await dependencies.listen(app, {
@@ -84,12 +84,7 @@ export async function startAgent(
     port: config.agent.port,
   });
   app.log.info(
-    {
-      address,
-      host: config.agent.host,
-      port: config.agent.port,
-      logLevel: config.agent.logLevel,
-    },
+    { address, host: config.agent.host, port: config.agent.port },
     "Remote Deck agent started",
   );
   return app;
@@ -101,7 +96,7 @@ if (
   pathToFileURL(entrypoint).href === import.meta.url
 ) {
   try {
-    await startAgent(loadConfig());
+    await startAgent(remoteDeckConfig);
   } catch (error) {
     console.error("Remote Deck agent failed to start", error);
     process.exitCode = 1;

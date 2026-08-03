@@ -19,11 +19,12 @@
     ]
   },
   "include": [
-    "app.config.ts",
     "app/**/*.tsx",
     "components/**/*.tsx",
     "lib/**/*.ts",
+    "lib/**/*.tsx",
     "test/**/*.ts",
+    "test/**/*.tsx",
     "expo-env.d.ts",
     ".expo/types/**/*.ts"
   ]

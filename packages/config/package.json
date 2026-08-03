@@ -13,9 +13,6 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit"
   },
-  "dependencies": {
-    "yaml": "2.9.0"
-  },
   "devDependencies": {
     "@eslint/js": "9.39.2",
     "@types/node": "^24.0.0",

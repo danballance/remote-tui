@@ -12,13 +12,9 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
-import {
-  getProject,
-  launchApp,
-  listApps,
-  type Project,
-  type RemoteApp,
-} from "../../lib/agent";
+import type { Project, PublicApplication } from "@remote-deck/contracts";
+
+import { useAgentClient } from "../../lib/AgentClientProvider";
 
 /** Converts caught values into text that can be shown alongside the launcher. */
 function messageFrom(error: unknown): string {
@@ -27,20 +23,17 @@ function messageFrom(error: unknown): string {
 
 /** Loads the selected project and renders the server-owned application catalog. */
 export default function ProjectLauncher() {
+  const agentClient = useAgentClient();
   const { projectId } = useLocalSearchParams<{ projectId: string }>();
   const [project, setProject] = useState<Project | null>(null);
-  const [apps, setApps] = useState<RemoteApp[]>([]);
+  const [apps, setApps] = useState<PublicApplication[]>([]);
   const [loading, setLoading] = useState(true);
   const [pendingAppId, setPendingAppId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    Promise.all([getProject(projectId), listApps()])
+    Promise.all([agentClient.getProject(projectId), agentClient.listApps()])
       .then(([loadedProject, loadedApps]) => {
-        console.info("[launcher] project and app catalog loaded", {
-          projectId,
-          appCount: loadedApps.length,
-        });
         setProject(loadedProject);
         setApps(loadedApps);
       })
@@ -52,10 +45,10 @@ export default function ProjectLauncher() {
         setError(messageFrom(loadError));
       })
       .finally(() => setLoading(false));
-  }, [projectId]);
+  }, [agentClient, projectId]);
 
   /** Ensures the app window exists before opening its self-loading terminal route. */
-  async function openApp(application: RemoteApp): Promise<void> {
+  async function openApp(application: PublicApplication): Promise<void> {
     if (pendingAppId !== null) {
       return;
     }
@@ -68,7 +61,7 @@ export default function ProjectLauncher() {
     });
 
     try {
-      await launchApp(projectId, application.id);
+      await agentClient.launchApp(projectId, application.id);
       console.info("[launcher] app ready; opening terminal", {
         projectId,
         appId: application.id,

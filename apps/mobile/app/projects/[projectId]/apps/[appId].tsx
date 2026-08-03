@@ -14,18 +14,18 @@ import {
 } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { mobileConfig } from "@remote-deck/config/mobile";
+import type {
+  PublicApplication,
+  PublicApplicationAction,
+  TerminalFrame,
+} from "@remote-deck/contracts";
+
 import ActionInputModal, {
   type RemoteTextInputAction,
 } from "../../../../components/ActionInputModal";
-import TerminalView, { type TerminalFrame } from "../../../../components/TerminalView";
-import { getMobileConfig } from "../../../../lib/config";
-import {
-  getApp,
-  getSnapshot,
-  runRemoteAction,
-  type RemoteApp,
-  type RemoteAppAction,
-} from "../../../../lib/agent";
+import TerminalView from "../../../../components/TerminalView";
+import { useAgentClient } from "../../../../lib/AgentClientProvider";
 
 /** Waits briefly for a TUI to redraw before requesting the next snapshot. */
 function delay(milliseconds: number): Promise<void> {
@@ -79,12 +79,12 @@ function DeckButton({
 
 /** Displays a captured terminal frame and the selected app's allow-listed actions. */
 export default function AppTerminal() {
-  const mobileConfig = getMobileConfig();
+  const agentClient = useAgentClient();
   const { appId, projectId } = useLocalSearchParams<{
     appId: string;
     projectId: string;
   }>();
-  const [application, setApplication] = useState<RemoteApp | null>(null);
+  const [application, setApplication] = useState<PublicApplication | null>(null);
   const [snapshot, setSnapshot] = useState<TerminalFrame | null>(null);
   const [pendingActionId, setPendingActionId] = useState<string | null>(null);
   const [inputAction, setInputAction] = useState<RemoteTextInputAction | null>(null);
@@ -96,16 +96,11 @@ export default function AppTerminal() {
 
   // Fetch canonical app metadata here so direct navigation never relies on route labels.
   useEffect(() => {
-    Promise.all([getApp(appId), getSnapshot(projectId, appId)])
+    Promise.all([
+      agentClient.getApp(appId),
+      agentClient.getSnapshot(projectId, appId),
+    ])
       .then(([loadedApplication, loadedSnapshot]) => {
-        console.info("[terminal] app details and initial snapshot loaded", {
-          projectId,
-          appId,
-          actionCount: loadedApplication.actions.length,
-          running: loadedSnapshot.running,
-          columns: loadedSnapshot.columns,
-          rows: loadedSnapshot.rows,
-        });
         setApplication(loadedApplication);
         setSnapshot(loadedSnapshot);
       })
@@ -117,7 +112,7 @@ export default function AppTerminal() {
         });
         setError(messageFrom(loadError));
       });
-  }, [appId, projectId]);
+  }, [agentClient, appId, projectId]);
 
   /** Lets Android back restore the split layout before navigating away. */
   useEffect(() => {
@@ -126,31 +121,25 @@ export default function AppTerminal() {
     }
 
     const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
-      console.info("[terminal] Android back collapsed the expanded terminal", {
-        projectId,
-        appId,
-      });
       setTerminalExpanded(false);
       return true;
     });
     return () => subscription.remove();
-  }, [appId, projectId, terminalExpanded]);
+  }, [terminalExpanded]);
 
   /** Receives expand/collapse requests from the xterm DOM component. */
   const handleTerminalExpandedChange = useCallback(
     async (expanded: boolean): Promise<void> => {
-      console.info("[terminal] terminal display mode changed", {
-        projectId,
-        appId,
-        expanded,
-      });
       setTerminalExpanded(expanded);
     },
-    [appId, projectId],
+    [],
   );
 
   /** Sends an action and refreshes the terminal even when execution fails partway. */
-  async function runAction(action: RemoteAppAction, input?: string): Promise<void> {
+  async function runAction(
+    action: PublicApplicationAction,
+    input?: string,
+  ): Promise<void> {
     if (pendingActionId !== null) {
       return;
     }
@@ -167,7 +156,7 @@ export default function AppTerminal() {
 
     let actionError: unknown;
     try {
-      await runRemoteAction(projectId, appId, action.id, input);
+      await agentClient.runAction(projectId, appId, action.id, input);
     } catch (caughtActionError) {
       actionError = caughtActionError;
       console.error("[terminal] app action failed", {
@@ -180,7 +169,7 @@ export default function AppTerminal() {
 
     try {
       await delay(mobileConfig.refreshDelayMs);
-      const refreshedSnapshot = await getSnapshot(projectId, appId);
+      const refreshedSnapshot = await agentClient.getSnapshot(projectId, appId);
       setSnapshot(refreshedSnapshot);
       if (actionError === undefined) {
         setFeedback(`${action.label} sent.`);
@@ -207,7 +196,7 @@ export default function AppTerminal() {
   }
 
   /** Opens a prompt for input actions and immediately runs all other actions. */
-  function handleActionPress(action: RemoteAppAction): void {
+  function handleActionPress(action: PublicApplicationAction): void {
     if (action.input === undefined) {
       void runAction(action);
       return;

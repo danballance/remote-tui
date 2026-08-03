@@ -1,6 +1,3 @@
-/** Protocols supported by the current HTTP agent and mobile client. */
-export type AgentProtocol = "http" | "https";
-
 /** Pino/Fastify log levels accepted by the desktop agent. */
 export type AgentLogLevel =
   | "trace"
@@ -11,13 +8,11 @@ export type AgentLogLevel =
   | "fatal"
   | "silent";
 
-/** Agent startup, persistence, and catalog settings. */
+/** Agent startup and persistence settings. */
 export interface AgentConfig {
-  readonly protocol: AgentProtocol;
   readonly host: string;
   readonly port: number;
   readonly logLevel: AgentLogLevel;
-  readonly applicationCatalogPath: string;
   readonly projectStorePath: string;
 }
 
@@ -33,31 +28,21 @@ export interface TmuxConfig {
   readonly terminal: TmuxTerminalConfig;
 }
 
-/** Mobile terminal sizing values embedded by Expo. */
+/** Mobile terminal sizing settings. */
 export interface MobileTerminalConfig extends TmuxTerminalConfig {
   readonly fontSize: number;
   readonly maxFittedFontSize: number;
 }
 
-/** Complete mobile-safe configuration embedded in the Expo manifest. */
+/** Complete settings safe to bundle with the mobile application. */
 export interface MobileConfig {
   readonly agentUrl: string;
   readonly refreshDelayMs: number;
   readonly terminal: MobileTerminalConfig;
 }
 
-/** Mobile-only settings from the private root configuration. */
-export interface MobileSourceConfig {
-  readonly refreshDelayMs: number;
-  readonly terminal: {
-    readonly fontSize: number;
-    readonly maxFittedFontSize: number;
-  };
-}
-
-/** Complete validated configuration used to compose Remote Deck. */
+/** Complete settings used by the desktop agent. */
 export interface RemoteDeckConfig {
   readonly agent: AgentConfig;
   readonly tmux: TmuxConfig;
-  readonly mobile: MobileSourceConfig;
 }

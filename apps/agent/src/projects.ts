@@ -8,12 +8,9 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
-/** A user-visible workspace and the directory shared by all of its tmux windows. */
-export interface Project {
-  id: string;
-  name: string;
-  directory: string;
-}
+import type { Project } from "@remote-deck/contracts";
+
+export type { Project } from "@remote-deck/contracts";
 
 /**
  * Storage boundary for projects.

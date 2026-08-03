@@ -2,10 +2,26 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { RemoteDeckConfig } from "@remote-deck/config";
+import type { FastifyInstance } from "fastify";
 
-import type { AppDefinition } from "../src/applications.js";
 import type { Project, ProjectRepository } from "../src/projects.js";
-import { startAgent, type AgentServerDependencies } from "../src/server.js";
+import {
+  startAgent,
+  type AgentServerDependencies,
+} from "../src/server.js";
+
+const config: RemoteDeckConfig = {
+  agent: {
+    host: "127.0.0.1",
+    port: 49_001,
+    logLevel: "silent",
+    projectStorePath: "/test/projects.json",
+  },
+  tmux: {
+    sessionPrefix: "test-deck-",
+    terminal: { columns: 91, rows: 27 },
+  },
+};
 
 class MemoryProjectRepository implements ProjectRepository {
   readonly projects: Project[] = [];
@@ -23,61 +39,60 @@ class MemoryProjectRepository implements ProjectRepository {
   }
 }
 
-test("composes paths, logging, IDs, and listen address from config", async (context) => {
-  const config: RemoteDeckConfig = {
-    agent: {
-      protocol: "https",
-      host: "127.0.0.7",
-      port: 49_876,
-      logLevel: "silent",
-      applicationCatalogPath: "/config/catalog.yaml",
-      projectStorePath: "/state/projects.json",
-    },
-    tmux: {
-      sessionPrefix: "configured-",
-      terminal: { columns: 88, rows: 24 },
-    },
-    mobile: {
-      refreshDelayMs: 5,
-      terminal: { fontSize: 8, maxFittedFontSize: 30 },
-    },
-  };
+test("composes typed settings, static catalog, repository, and tmux runtime", async (context) => {
   const repository = new MemoryProjectRepository();
-  const applications: readonly AppDefinition[] = [];
   const openedPaths: string[] = [];
+  const tmuxCalls: string[][] = [];
+  let listenedApp: FastifyInstance | undefined;
   let listenOptions: { readonly host: string; readonly port: number } | undefined;
+
   const dependencies: AgentServerDependencies = {
-    loadApplications: async (path) => {
-      openedPaths.push(path);
-      return applications;
-    },
     openProjectRepository: async (path) => {
       openedPaths.push(path);
       return repository;
     },
-    createProjectId: () => "configured-id",
-    executeTmux: async () => ({ stdout: "", stderr: "" }),
-    listen: async (_app, options) => {
+    createProjectId: () => "generated-id",
+    executeTmux: async (arguments_) => {
+      tmuxCalls.push([...arguments_]);
+      return { stdout: "%1\n", stderr: "" };
+    },
+    listen: async (app, options) => {
+      listenedApp = app;
       listenOptions = options;
-      return "https://127.0.0.7:49876";
+      return "http://127.0.0.1:49001";
     },
   };
 
   const app = await startAgent(config, dependencies);
-  context.after(async () => app.close());
+  context.after(async () => await app.close());
 
-  assert.deepEqual(openedPaths, [
-    "/config/catalog.yaml",
-    "/state/projects.json",
-  ]);
-  assert.deepEqual(listenOptions, { host: "127.0.0.7", port: 49_876 });
-  assert.equal(app.log.level, "silent");
+  assert.equal(listenedApp, app);
+  assert.deepEqual(openedPaths, ["/test/projects.json"]);
+  assert.deepEqual(listenOptions, { host: "127.0.0.1", port: 49_001 });
 
-  const response = await app.inject({
+  const apps = await app.inject({ method: "GET", url: "/apps" });
+  assert.deepEqual(
+    apps.json().map((application: { id: string }) => application.id),
+    ["lazygit", "yazi", "pi"],
+  );
+
+  await app.inject({
     method: "POST",
     url: "/projects",
-    payload: { name: "Configured", directory: "/work/configured" },
+    payload: { name: "Project", directory: "/work/project" },
   });
-  assert.equal(response.statusCode, 201);
-  assert.equal(response.json().id, "configured-id");
+  const launched = await app.inject({
+    method: "POST",
+    url: "/projects/generated-id/apps/lazygit/launch",
+  });
+  assert.equal(launched.statusCode, 204);
+  assert.deepEqual(tmuxCalls, [
+    [
+      "display-message",
+      "-p",
+      "-t",
+      "=test-deck-generated-id:lazygit.0",
+      "#{pane_id}",
+    ],
+  ]);
 });
