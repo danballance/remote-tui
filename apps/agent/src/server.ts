@@ -2,23 +2,18 @@
 
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { fileURLToPath } from "node:url";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-import { createAgentApp, type TmuxExecutor } from "./app.js";
-import {
-  APPLICATION_CATALOG_PATH,
-  loadApplicationCatalog,
-} from "./applications.js";
-import { createJsonProjectRepository } from "./projects.js";
+import { loadConfig, type RemoteDeckConfig } from "@remote-deck/config";
+import type { FastifyInstance } from "fastify";
 
-const AGENT_HOST = "192.168.86.75";
-const AGENT_PORT = 43_820;
-/** Set to `debug` when tmux probes and snapshot metadata are needed. */
-const AGENT_LOG_LEVEL = process.env.REMOTE_DECK_LOG_LEVEL ?? "info";
-const PROJECT_STORE_PATH = fileURLToPath(
-  new URL("../.data/projects.json", import.meta.url),
-);
+import { createAgentApp, type TmuxExecutor } from "./app.js";
+import { loadApplicationCatalog, type AppDefinition } from "./applications.js";
+import {
+  createJsonProjectRepository,
+  type ProjectRepository,
+} from "./projects.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -30,42 +25,85 @@ const executeTmux: TmuxExecutor = async (arguments_) => {
   return { stdout, stderr };
 };
 
-async function startAgent(): Promise<void> {
-  const applications = await loadApplicationCatalog();
-  const projectRepository = await createJsonProjectRepository(PROJECT_STORE_PATH);
+/** Injectable startup dependencies used by production and composition tests. */
+export interface AgentServerDependencies {
+  loadApplications(path: string): Promise<readonly AppDefinition[]>;
+  openProjectRepository(path: string): Promise<ProjectRepository>;
+  createProjectId(): string;
+  executeTmux: TmuxExecutor;
+  listen(
+    app: FastifyInstance,
+    options: { readonly host: string; readonly port: number },
+  ): Promise<string>;
+}
+
+const productionDependencies: AgentServerDependencies = {
+  loadApplications: loadApplicationCatalog,
+  openProjectRepository: createJsonProjectRepository,
+  createProjectId: randomUUID,
+  executeTmux,
+  listen: async (app, options) => await app.listen(options),
+};
+
+/** Composes and starts the agent from one already validated configuration value. */
+export async function startAgent(
+  config: RemoteDeckConfig,
+  dependencies: AgentServerDependencies = productionDependencies,
+): Promise<FastifyInstance> {
+  const applications = await dependencies.loadApplications(
+    config.agent.applicationCatalogPath,
+  );
+  const projectRepository = await dependencies.openProjectRepository(
+    config.agent.projectStorePath,
+  );
   const app = createAgentApp({
     applications,
+    config,
     projectRepository,
-    createProjectId: randomUUID,
-    executeTmux,
-    logLevel: AGENT_LOG_LEVEL,
+    createProjectId: dependencies.createProjectId,
+    executeTmux: dependencies.executeTmux,
   });
 
   app.log.info(
     {
-      applicationCatalogPath: APPLICATION_CATALOG_PATH,
+      applicationCatalogPath: config.agent.applicationCatalogPath,
       appCount: applications.length,
     },
     "application catalog loaded",
   );
   app.log.info(
     {
-      projectStorePath: PROJECT_STORE_PATH,
+      projectStorePath: config.agent.projectStorePath,
       projectCount: (await projectRepository.listProjects()).length,
     },
     "project repository opened",
   );
 
-  const address = await app.listen({ host: AGENT_HOST, port: AGENT_PORT });
+  const address = await dependencies.listen(app, {
+    host: config.agent.host,
+    port: config.agent.port,
+  });
   app.log.info(
-    { address, host: AGENT_HOST, port: AGENT_PORT, logLevel: AGENT_LOG_LEVEL },
+    {
+      address,
+      host: config.agent.host,
+      port: config.agent.port,
+      logLevel: config.agent.logLevel,
+    },
     "Remote Deck agent started",
   );
+  return app;
 }
 
-try {
-  await startAgent();
-} catch (error) {
-  console.error("Remote Deck agent failed to start", error);
-  process.exitCode = 1;
+const entrypoint = process.argv[1];
+if (
+  entrypoint !== undefined &&
+  pathToFileURL(entrypoint).href === import.meta.url
+) {
+  try {
+    await startAgent(loadConfig());
+  } catch (error) {
+    console.error("Remote Deck agent failed to start", error);
+    process.exitCode = 1;
+  }
 }

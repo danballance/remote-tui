@@ -8,6 +8,8 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { useCallback, useEffect, useRef, type CSSProperties } from "react";
 
+import type { MobileTerminalConfig } from "@remote-deck/config/mobile";
+
 import { widthFittedFontSize } from "./terminalSizing";
 
 /** Serializable terminal state needed to reproduce one captured tmux pane. */
@@ -30,6 +32,7 @@ export interface TerminalFrame {
 
 /** Props passed through Expo's DOM component bridge. */
 interface TerminalViewProps {
+  config: MobileTerminalConfig;
   expanded: boolean;
   frame: TerminalFrame;
   onExpandedChange(expanded: boolean): Promise<void>;
@@ -45,21 +48,18 @@ export interface TerminalSafeAreaInsets {
   left: number;
 }
 
-const DEFAULT_COLUMNS = 120;
-const DEFAULT_ROWS = 35;
-const DEFAULT_FONT_SIZE = 9;
-const MAX_FITTED_FONT_SIZE = 48;
-
 /**
  * Owns one read-only xterm instance and replaces its full contents for each frame.
  * Input stays disabled because commands are sent through explicit mobile controls.
  */
 export default function TerminalView({
+  config,
   expanded,
   frame,
   onExpandedChange,
   safeAreaInsets,
 }: TerminalViewProps) {
+  const { columns, fontSize, maxFittedFontSize, rows } = config;
   const containerRef = useRef<HTMLDivElement>(null);
   const shellRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -89,24 +89,24 @@ export default function TerminalView({
       }
 
       if (!expandedRef.current) {
-        terminal.options.fontSize = DEFAULT_FONT_SIZE;
+        terminal.options.fontSize = fontSize;
         shellRef.current?.scrollTo({ left: 0, top: 0 });
         return;
       }
 
       const initialProposal = fitAddon.proposeDimensions();
       if (initialProposal === undefined || !Number.isFinite(initialProposal.cols)) {
-        terminal.options.fontSize = DEFAULT_FONT_SIZE;
+        terminal.options.fontSize = fontSize;
         return;
       }
 
       const initialCandidate = widthFittedFontSize({
-        minimumFontSize: DEFAULT_FONT_SIZE,
-        measuredFontSize: terminal.options.fontSize ?? DEFAULT_FONT_SIZE,
+        minimumFontSize: fontSize,
+        measuredFontSize: terminal.options.fontSize ?? fontSize,
         frameColumns: frameColumnsRef.current,
         proposedColumns: initialProposal.cols,
       });
-      let bestCandidate = DEFAULT_FONT_SIZE;
+      let bestCandidate = fontSize;
 
       const finish = (fontSize: number): void => {
         terminal.options.fontSize = fontSize;
@@ -136,13 +136,13 @@ export default function TerminalView({
           }
           const proposal = fitAddon.proposeDimensions();
           if (proposal === undefined || !Number.isFinite(proposal.cols)) {
-            finish(DEFAULT_FONT_SIZE);
+            finish(fontSize);
             return;
           }
 
           if (proposal.cols >= frameColumnsRef.current) {
             bestCandidate = candidate;
-            if (candidate < MAX_FITTED_FONT_SIZE) {
+            if (candidate < maxFittedFontSize) {
               measureCandidate(candidate + 1);
             } else {
               finish(candidate);
@@ -160,7 +160,7 @@ export default function TerminalView({
 
       measureCandidate(initialCandidate);
     });
-  }, []);
+  }, [fontSize, maxFittedFontSize]);
 
   useEffect(() => {
     if (containerRef.current === null) {
@@ -168,13 +168,13 @@ export default function TerminalView({
     }
 
     const terminal = new Terminal({
-      cols: DEFAULT_COLUMNS,
-      rows: DEFAULT_ROWS,
+      cols: columns,
+      rows,
       convertEol: true,
       cursorBlink: false,
       disableStdin: true,
       fontFamily: "monospace",
-      fontSize: DEFAULT_FONT_SIZE,
+      fontSize,
       scrollback: 0,
       theme: {
         background: "#020617",
@@ -191,8 +191,8 @@ export default function TerminalView({
     resizeObserver.observe(containerRef.current);
     void document.fonts.ready.then(() => scheduleTerminalSizing(false));
     console.info("[terminal-view] xterm renderer opened", {
-      columns: DEFAULT_COLUMNS,
-      rows: DEFAULT_ROWS,
+      columns,
+      rows,
     });
 
     return () => {
@@ -206,7 +206,7 @@ export default function TerminalView({
       terminalRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [scheduleTerminalSizing]);
+  }, [columns, fontSize, rows, scheduleTerminalSizing]);
 
   useEffect(() => {
     const terminal = terminalRef.current;

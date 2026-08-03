@@ -6,8 +6,7 @@
  */
 
 import type { TerminalFrame } from "../components/TerminalView";
-
-const AGENT_URL = "http://192.168.86.75:43820";
+import { getMobileConfig } from "./config";
 
 /** Mobile representation of a persisted remote project. */
 export interface Project {
@@ -51,7 +50,7 @@ async function request(path: string, init?: RequestInit): Promise<Response> {
 
   let response: Response;
   try {
-    response = await fetch(`${AGENT_URL}${path}`, init);
+    response = await fetch(`${getMobileConfig().agentUrl}${path}`, init);
   } catch (error) {
     console.error("[agent] request failed before receiving a response", {
       method,

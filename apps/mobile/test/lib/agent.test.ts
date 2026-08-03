@@ -12,7 +12,7 @@ import {
   runRemoteAction,
 } from "../../lib/agent.js";
 
-const AGENT_URL = "http://192.168.86.75:43820";
+const AGENT_URL = "http://127.0.0.9:4567";
 
 interface FetchCall {
   input: string | URL | Request;

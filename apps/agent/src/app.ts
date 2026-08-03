@@ -7,6 +7,8 @@
 
 import Fastify, { type FastifyInstance } from "fastify";
 
+import type { RemoteDeckConfig } from "@remote-deck/config";
+
 import {
   executeAppAction,
   InvalidActionRequestError,
@@ -24,9 +26,6 @@ import {
   privateTmuxFailureStatus,
 } from "./tmux-privacy.js";
 
-const SESSION_PREFIX = "remote-deck-";
-const TERMINAL_COLUMNS = 120;
-const TERMINAL_ROWS = 35;
 const TERMINAL_METADATA_FORMAT =
   "#{pane_width}\t#{pane_height}\t#{cursor_x}\t#{cursor_y}\t#{cursor_flag}";
 
@@ -55,6 +54,7 @@ export interface TmuxExecutor {
 /** Dependencies supplied by the production entry point or a unit test. */
 export interface AgentAppOptions {
   applications: readonly AppDefinition[];
+  config: RemoteDeckConfig;
   projectRepository: ProjectRepository;
   createProjectId(): string;
   executeTmux: TmuxExecutor;
@@ -86,12 +86,12 @@ function commandResponse(error: unknown): { stdout: unknown; stderr: unknown } {
 /** Builds the agent without opening files, spawning tmux, or listening on a port. */
 export function createAgentApp({
   applications,
+  config,
   projectRepository,
   createProjectId,
   executeTmux,
-  logLevel = "silent",
 }: AgentAppOptions): FastifyInstance {
-  const app = Fastify({ logger: { level: logLevel } });
+  const app = Fastify({ logger: { level: config.agent.logLevel } });
   const paneActionQueue = new PaneActionQueue();
 
   /** Runs tmux while applying response and privacy-aware structured logging. */
@@ -153,7 +153,7 @@ export function createAgentApp({
 
   /** Derives the private tmux session name owned by a project. */
   function sessionName(project: Project): string {
-    return `${SESSION_PREFIX}${project.id}`;
+    return `${config.tmux.sessionPrefix}${project.id}`;
   }
 
   /** Targets the single primary pane in an application's named tmux window. */
@@ -235,9 +235,9 @@ export function createAgentApp({
         "new-session",
         "-d",
         "-x",
-        String(TERMINAL_COLUMNS),
+        String(config.tmux.terminal.columns),
         "-y",
-        String(TERMINAL_ROWS),
+        String(config.tmux.terminal.rows),
         "-s",
         projectSession,
         "-n",
@@ -286,8 +286,8 @@ export function createAgentApp({
   function stoppedFrame(): TerminalFrame {
     return {
       running: false,
-      columns: TERMINAL_COLUMNS,
-      rows: TERMINAL_ROWS,
+      columns: config.tmux.terminal.columns,
+      rows: config.tmux.terminal.rows,
       ansi: "",
       cursorX: 0,
       cursorY: 0,

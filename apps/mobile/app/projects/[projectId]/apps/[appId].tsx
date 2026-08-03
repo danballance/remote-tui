@@ -18,6 +18,7 @@ import ActionInputModal, {
   type RemoteTextInputAction,
 } from "../../../../components/ActionInputModal";
 import TerminalView, { type TerminalFrame } from "../../../../components/TerminalView";
+import { getMobileConfig } from "../../../../lib/config";
 import {
   getApp,
   getSnapshot,
@@ -25,8 +26,6 @@ import {
   type RemoteApp,
   type RemoteAppAction,
 } from "../../../../lib/agent";
-
-const REFRESH_DELAY_MS = 100;
 
 /** Waits briefly for a TUI to redraw before requesting the next snapshot. */
 function delay(milliseconds: number): Promise<void> {
@@ -80,6 +79,7 @@ function DeckButton({
 
 /** Displays a captured terminal frame and the selected app's allow-listed actions. */
 export default function AppTerminal() {
+  const mobileConfig = getMobileConfig();
   const { appId, projectId } = useLocalSearchParams<{
     appId: string;
     projectId: string;
@@ -179,7 +179,7 @@ export default function AppTerminal() {
     }
 
     try {
-      await delay(REFRESH_DELAY_MS);
+      await delay(mobileConfig.refreshDelayMs);
       const refreshedSnapshot = await getSnapshot(projectId, appId);
       setSnapshot(refreshedSnapshot);
       if (actionError === undefined) {
@@ -274,6 +274,7 @@ export default function AppTerminal() {
             </Text>
           ) : snapshot.running ? (
             <TerminalView
+              config={mobileConfig.terminal}
               dom={{ scrollEnabled: true, style: styles.terminalWebView }}
               expanded={terminalExpanded}
               frame={snapshot}

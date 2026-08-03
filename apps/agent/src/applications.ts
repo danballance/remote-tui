@@ -7,7 +7,6 @@
  */
 
 import { readFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
 
 import { parse } from "yaml";
 
@@ -59,11 +58,6 @@ export interface PublicAppActionDefinition {
   label: string;
   input?: AppActionTextInputDefinition;
 }
-
-/** Fixed catalog path, resolved independently of the agent's working directory. */
-export const APPLICATION_CATALOG_PATH = fileURLToPath(
-  new URL("../apps.yaml", import.meta.url),
-);
 
 const APP_FIELDS = new Set(["id", "title", "command", "actions"]);
 const ACTION_FIELDS = new Set([
@@ -311,9 +305,9 @@ export function publicApplication(application: AppDefinition): PublicAppDefiniti
   };
 }
 
-/** Reads the fixed startup catalog and adds its location to any failure. */
+/** Reads the configured startup catalog and adds its location to any failure. */
 export async function loadApplicationCatalog(
-  catalogPath: string = APPLICATION_CATALOG_PATH,
+  catalogPath: string,
 ): Promise<readonly AppDefinition[]> {
   let source: string;
   try {

@@ -1,0 +1,27 @@
+{
+  "name": "@remote-deck/config",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./mobile": "./src/mobile.ts"
+  },
+  "scripts": {
+    "test": "node --import tsx --test --test-isolation=none \"test/**/*.test.ts\"",
+    "test:coverage": "node --experimental-test-coverage --test-coverage-include=src/**/*.ts --test-coverage-lines=90 --test-coverage-branches=85 --test-coverage-functions=90 --import tsx --test --test-isolation=none \"test/**/*.test.ts\"",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "yaml": "2.9.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.2",
+    "@types/node": "^24.0.0",
+    "eslint": "9.39.2",
+    "tsx": "4.23.1",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.65.0"
+  }
+}

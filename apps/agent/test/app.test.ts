@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import type { RemoteDeckConfig } from "@remote-deck/config";
+
 import {
   createAgentApp,
   type AgentAppOptions,
@@ -37,6 +39,25 @@ const applications: readonly AppDefinition[] = [
     ],
   },
 ];
+
+const config: RemoteDeckConfig = {
+  agent: {
+    protocol: "http",
+    host: "127.0.0.1",
+    port: 49_001,
+    logLevel: "silent",
+    applicationCatalogPath: "/test/apps.yaml",
+    projectStorePath: "/test/projects.json",
+  },
+  tmux: {
+    sessionPrefix: "test-deck-",
+    terminal: { columns: 91, rows: 27 },
+  },
+  mobile: {
+    refreshDelayMs: 7,
+    terminal: { fontSize: 11, maxFittedFontSize: 37 },
+  },
+};
 
 class MemoryProjectRepository implements ProjectRepository {
   readonly projects: Project[];
@@ -84,6 +105,7 @@ function harness(
     calls,
     options: {
       applications,
+      config,
       projectRepository: repository,
       createProjectId: () => "generated-id",
       executeTmux,
@@ -218,17 +240,17 @@ test("creates the first app as a fixed-size project session", async (context) =>
 
   assert.equal(response.statusCode, 204);
   assert.deepEqual(testHarness.calls, [
-    ["has-session", "-t", "remote-deck-project-1"],
-    ["has-session", "-t", "remote-deck-project-1"],
+    ["has-session", "-t", "test-deck-project-1"],
+    ["has-session", "-t", "test-deck-project-1"],
     [
       "new-session",
       "-d",
       "-x",
-      "120",
+      "91",
       "-y",
-      "35",
+      "27",
       "-s",
-      "remote-deck-project-1",
+      "test-deck-project-1",
       "-n",
       "demo",
       "-c",
@@ -253,20 +275,20 @@ test("creates a sibling app window when the session already exists", async (cont
 
   assert.equal(response.statusCode, 204);
   assert.deepEqual(testHarness.calls, [
-    ["has-session", "-t", "remote-deck-project-1"],
+    ["has-session", "-t", "test-deck-project-1"],
     [
       "list-windows",
       "-t",
-      "remote-deck-project-1",
+      "test-deck-project-1",
       "-F",
       "#{window_name}",
     ],
-    ["has-session", "-t", "remote-deck-project-1"],
+    ["has-session", "-t", "test-deck-project-1"],
     [
       "new-window",
       "-d",
       "-t",
-      "remote-deck-project-1",
+      "test-deck-project-1",
       "-n",
       "demo",
       "-c",
@@ -311,15 +333,15 @@ test("returns a stable stopped snapshot without attempting capture", async (cont
   assert.equal(response.statusCode, 200);
   assert.deepEqual(response.json(), {
     running: false,
-    columns: 120,
-    rows: 35,
+    columns: 91,
+    rows: 27,
     ansi: "",
     cursorX: 0,
     cursorY: 0,
     cursorVisible: false,
   });
   assert.deepEqual(testHarness.calls, [
-    ["has-session", "-t", "remote-deck-project-1"],
+    ["has-session", "-t", "test-deck-project-1"],
   ]);
 });
 
@@ -360,13 +382,13 @@ test("captures ANSI content and terminal metadata from the exact app pane", asyn
       "-e",
       "-N",
       "-t",
-      "remote-deck-project-1:demo.0",
+      "test-deck-project-1:demo.0",
     ],
     [
       "display-message",
       "-p",
       "-t",
-      "remote-deck-project-1:demo.0",
+      "test-deck-project-1:demo.0",
       "#{pane_width}\t#{pane_height}\t#{cursor_x}\t#{cursor_y}\t#{cursor_flag}",
     ],
   ]);
@@ -395,7 +417,7 @@ test("rejects malformed and stopped actions before sending keys", async (context
   });
   assert.equal(stopped.statusCode, 404);
   assert.deepEqual(stoppedHarness.calls, [
-    ["has-session", "-t", "remote-deck-project-1"],
+    ["has-session", "-t", "test-deck-project-1"],
   ]);
 });
 
@@ -413,7 +435,7 @@ test("sends immediate and input actions to a running pane in exact order", async
   });
   assert.equal(immediate.statusCode, 204);
   assert.deepEqual(testHarness.calls.slice(-1), [
-    ["send-keys", "-t", "remote-deck-project-1:demo.0", "Up"],
+    ["send-keys", "-t", "test-deck-project-1:demo.0", "Up"],
   ]);
 
   testHarness.calls.length = 0;
@@ -424,24 +446,24 @@ test("sends immediate and input actions to a running pane in exact order", async
   });
   assert.equal(input.statusCode, 204);
   assert.deepEqual(testHarness.calls, [
-    ["has-session", "-t", "remote-deck-project-1"],
+    ["has-session", "-t", "test-deck-project-1"],
     [
       "list-windows",
       "-t",
-      "remote-deck-project-1",
+      "test-deck-project-1",
       "-F",
       "#{window_name}",
     ],
-    ["send-keys", "-t", "remote-deck-project-1:demo.0", "c"],
+    ["send-keys", "-t", "test-deck-project-1:demo.0", "c"],
     [
       "send-keys",
       "-t",
-      "remote-deck-project-1:demo.0",
+      "test-deck-project-1:demo.0",
       "-l",
       "--",
       "fix: exact order",
     ],
-    ["send-keys", "-t", "remote-deck-project-1:demo.0", "Enter"],
+    ["send-keys", "-t", "test-deck-project-1:demo.0", "Enter"],
   ]);
 });
 

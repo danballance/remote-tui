@@ -1,0 +1,25 @@
+# Operational Remote Deck configuration. Values are loaded once when the agent
+# starts and when Expo evaluates the mobile application configuration.
+# Each leaf can be overridden with REMOTE_DECK_<YAML_PATH>; for example,
+# REMOTE_DECK_AGENT_HOST or REMOTE_DECK_MOBILE_TERMINAL_FONT_SIZE. The YAML file
+# itself can be replaced with REMOTE_DECK_CONFIG_PATH. REMOTE_DECK_LOG_LEVEL is
+# retained as a compatibility alias for REMOTE_DECK_AGENT_LOG_LEVEL.
+agent:
+  protocol: http
+  host: 192.168.86.75
+  port: 43820
+  logLevel: info
+  applicationCatalogPath: apps/agent/apps.yaml
+  projectStorePath: apps/agent/.data/projects.json
+
+tmux:
+  sessionPrefix: remote-deck-
+  terminal:
+    columns: 120
+    rows: 35
+
+mobile:
+  refreshDelayMs: 100
+  terminal:
+    fontSize: 9
+    maxFittedFontSize: 48

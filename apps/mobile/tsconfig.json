@@ -19,6 +19,7 @@
     ]
   },
   "include": [
+    "app.config.ts",
     "app/**/*.tsx",
     "components/**/*.tsx",
     "lib/**/*.ts",

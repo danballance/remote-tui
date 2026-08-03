@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { loadConfig } from "@remote-deck/config";
+
 import {
-  APPLICATION_CATALOG_PATH,
   loadApplicationCatalog,
   parseApplicationCatalog,
   publicApplication,
@@ -49,7 +50,8 @@ function assertInvalid(source: string, expectedMessage: RegExp): void {
 }
 
 test("loads the checked-in catalog with private command definitions intact", async () => {
-  assert.deepEqual(await loadApplicationCatalog(APPLICATION_CATALOG_PATH), [
+  const config = loadConfig({ environment: {} });
+  assert.deepEqual(await loadApplicationCatalog(config.agent.applicationCatalogPath), [
     {
       id: "lazygit",
       title: "LazyGit",

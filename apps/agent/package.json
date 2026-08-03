@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@remote-deck/config": "workspace:*",
     "fastify": "5.11.0",
     "yaml": "2.9.0"
   },
