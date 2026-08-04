@@ -3,7 +3,10 @@
 import type { TerminalFrame } from "@remote-deck/contracts";
 import type { TmuxConfig } from "@remote-deck/config";
 
-import { buildActionCommandPlan } from "./actions.js";
+import {
+  buildActionCommandPlan,
+  type ActionCommand,
+} from "./actions.js";
 import type { AppActionDefinition, AppDefinition } from "./applications.js";
 import type { Project } from "./projects.js";
 
@@ -45,6 +48,14 @@ export interface RuntimeLogger {
 interface TmuxCallOptions {
   readonly logResponse?: boolean;
   readonly missingTargetIsExpected?: boolean;
+}
+
+interface PaneMetadata {
+  readonly columns: number;
+  readonly rows: number;
+  readonly cursorX: number;
+  readonly cursorY: number;
+  readonly cursorVisible: boolean;
 }
 
 /** Serializes complete action macros independently for each pane. */
@@ -111,15 +122,7 @@ export class TmuxApplicationRuntime implements ApplicationRuntime {
     const session = this.sessionName(project);
     const target = this.paneTarget(project, application);
 
-    if (
-      await this.targetExists([
-        "display-message",
-        "-p",
-        "-t",
-        this.exact(target),
-        "#{pane_id}",
-      ])
-    ) {
+    if (await this.paneExists(target)) {
       this.logger.info(
         { projectId: project.id, appId: application.id, target },
         "reusing existing app window",
@@ -127,27 +130,8 @@ export class TmuxApplicationRuntime implements ApplicationRuntime {
       return;
     }
 
-    const sessionExists = await this.targetExists([
-      "has-session",
-      "-t",
-      this.exact(session),
-    ]);
-    if (!sessionExists) {
-      await this.runTmux([
-        "new-session",
-        "-d",
-        "-x",
-        String(this.config.terminal.columns),
-        "-y",
-        String(this.config.terminal.rows),
-        "-s",
-        session,
-        "-n",
-        application.id,
-        "-c",
-        project.directory,
-        application.command,
-      ]);
+    if (!(await this.sessionExists(session))) {
+      await this.createSession(session, project, application);
       this.logger.info(
         { projectId: project.id, appId: application.id, session, target },
         "created project session with its first app window",
@@ -155,17 +139,7 @@ export class TmuxApplicationRuntime implements ApplicationRuntime {
       return;
     }
 
-    await this.runTmux([
-      "new-window",
-      "-d",
-      "-t",
-      this.exact(session),
-      "-n",
-      application.id,
-      "-c",
-      project.directory,
-      application.command,
-    ]);
+    await this.createWindow(session, project, application);
     this.logger.info(
       { projectId: project.id, appId: application.id, session, target },
       "created app window in existing project session",
@@ -177,56 +151,19 @@ export class TmuxApplicationRuntime implements ApplicationRuntime {
     application: AppDefinition,
   ): Promise<TerminalFrame> {
     const target = this.paneTarget(project, application);
-    let ansi: string;
-    try {
-      ansi = await this.runTmux(
-        ["capture-pane", "-p", "-e", "-N", "-t", this.exact(target)],
-        { logResponse: false, missingTargetIsExpected: true },
-      );
-    } catch (error) {
-      if (isMissingTmuxTargetError(error)) {
-        return this.stoppedFrame();
-      }
-      throw error;
+    const ansi = await this.capturePane(target);
+    if (ansi === undefined) {
+      return this.stoppedFrame();
     }
 
-    let metadata: string;
-    try {
-      metadata = await this.runTmux(
-        [
-          "display-message",
-          "-p",
-          "-t",
-          this.exact(target),
-          TERMINAL_METADATA_FORMAT,
-        ],
-        { missingTargetIsExpected: true },
-      );
-    } catch (error) {
-      if (isMissingTmuxTargetError(error)) {
-        return this.stoppedFrame();
-      }
-      throw error;
+    const metadata = await this.readPaneMetadata(target);
+    if (metadata === undefined) {
+      return this.stoppedFrame();
     }
-
-    const [columns, rows, cursorX, cursorY, cursorVisible] = metadata
-      .trimEnd()
-      .split("\t")
-      .map(Number);
-    if (
-      ![columns, rows, cursorX, cursorY, cursorVisible].every(Number.isInteger)
-    ) {
-      throw new Error(`tmux returned invalid terminal metadata for ${target}`);
-    }
-
     return {
       running: true,
-      columns: columns as number,
-      rows: rows as number,
+      ...metadata,
       ansi: ansi.replace(/\n$/, ""),
-      cursorX: cursorX as number,
-      cursorY: cursorY as number,
-      cursorVisible: cursorVisible === 1,
     };
   }
 
@@ -240,26 +177,10 @@ export class TmuxApplicationRuntime implements ApplicationRuntime {
     const commands = buildActionCommandPlan(action, input);
 
     return await this.#actionQueue.run(target, async () => {
-      try {
-        for (const command of commands) {
-          const arguments_ =
-            command.type === "keys"
-              ? ["send-keys", "-t", this.exact(target), ...command.arguments]
-              : [
-                  "send-keys",
-                  "-t",
-                  this.exact(target),
-                  "-l",
-                  "--",
-                  command.text,
-                ];
-          await this.runTmux(arguments_, { missingTargetIsExpected: true });
-        }
-      } catch (error) {
-        if (isMissingTmuxTargetError(error)) {
+      for (const command of commands) {
+        if (!(await this.sendActionCommand(target, command))) {
           return false;
         }
-        throw error;
       }
 
       this.logger.info(
@@ -299,16 +220,160 @@ export class TmuxApplicationRuntime implements ApplicationRuntime {
     };
   }
 
-  private async targetExists(arguments_: readonly string[]): Promise<boolean> {
+  private async paneExists(target: string): Promise<boolean> {
+    return (
+      (await this.runForExistingTarget(
+        [
+          "display-message",
+          "-p",
+          "-t",
+          this.exact(target),
+          "#{pane_id}",
+        ],
+        { logResponse: false },
+      )) !== undefined
+    );
+  }
+
+  private async sessionExists(session: string): Promise<boolean> {
+    return (
+      (await this.runForExistingTarget(
+        ["has-session", "-t", this.exact(session)],
+        { logResponse: false },
+      )) !== undefined
+    );
+  }
+
+  private async createSession(
+    session: string,
+    project: Project,
+    application: AppDefinition,
+  ): Promise<void> {
+    await this.runTmux([
+      "new-session",
+      "-d",
+      "-x",
+      String(this.config.terminal.columns),
+      "-y",
+      String(this.config.terminal.rows),
+      "-s",
+      session,
+      "-n",
+      application.id,
+      "-c",
+      project.directory,
+      application.command,
+    ]);
+  }
+
+  private async createWindow(
+    session: string,
+    project: Project,
+    application: AppDefinition,
+  ): Promise<void> {
+    await this.runTmux([
+      "new-window",
+      "-d",
+      "-t",
+      this.exact(session),
+      "-n",
+      application.id,
+      "-c",
+      project.directory,
+      application.command,
+    ]);
+  }
+
+  private async capturePane(target: string): Promise<string | undefined> {
+    return await this.runForExistingTarget(
+      ["capture-pane", "-p", "-e", "-N", "-t", this.exact(target)],
+      { logResponse: false },
+    );
+  }
+
+  private async readPaneMetadata(
+    target: string,
+  ): Promise<PaneMetadata | undefined> {
+    const response = await this.runForExistingTarget([
+      "display-message",
+      "-p",
+      "-t",
+      this.exact(target),
+      TERMINAL_METADATA_FORMAT,
+    ]);
+    if (response === undefined) {
+      return undefined;
+    }
+
+    const [columns, rows, cursorX, cursorY, cursorVisible] = response
+      .trimEnd()
+      .split("\t")
+      .map(Number);
+    if (
+      ![columns, rows, cursorX, cursorY, cursorVisible].every(Number.isInteger)
+    ) {
+      throw new Error(`tmux returned invalid terminal metadata for ${target}`);
+    }
+    return {
+      columns: columns as number,
+      rows: rows as number,
+      cursorX: cursorX as number,
+      cursorY: cursorY as number,
+      cursorVisible: cursorVisible === 1,
+    };
+  }
+
+  private async sendActionCommand(
+    target: string,
+    command: ActionCommand,
+  ): Promise<boolean> {
+    return command.type === "keys"
+      ? await this.sendKeysToPane(target, command.arguments)
+      : await this.sendLiteralTextToPane(target, command.text);
+  }
+
+  private async sendKeysToPane(
+    target: string,
+    keys: readonly string[],
+  ): Promise<boolean> {
+    return (
+      (await this.runForExistingTarget([
+        "send-keys",
+        "-t",
+        this.exact(target),
+        ...keys,
+      ])) !== undefined
+    );
+  }
+
+  private async sendLiteralTextToPane(
+    target: string,
+    text: string,
+  ): Promise<boolean> {
+    return (
+      (await this.runForExistingTarget([
+        "send-keys",
+        "-t",
+        this.exact(target),
+        "-l",
+        "--",
+        text,
+      ])) !== undefined
+    );
+  }
+
+  private async runForExistingTarget(
+    arguments_: readonly string[],
+    options: Omit<TmuxCallOptions, "missingTargetIsExpected"> = {},
+  ): Promise<string | undefined> {
     try {
-      await this.runTmux(arguments_, {
-        logResponse: false,
+      return await this.runTmux(arguments_, {
+        ...options,
         missingTargetIsExpected: true,
       });
-      return true;
     } catch (error) {
       if (isMissingTmuxTargetError(error)) {
-        return false;
+        return undefined;
       }
       throw error;
     }
