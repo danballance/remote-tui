@@ -4,6 +4,10 @@ import test from "node:test";
 import type { RemoteDeckConfig } from "@remote-deck/config";
 import type { FastifyInstance } from "fastify";
 
+import {
+  StaticApplicationCatalog,
+  type AppDefinition,
+} from "../src/applications.js";
 import type { Project, ProjectRepository } from "../src/projects.js";
 import {
   startAgent,
@@ -39,6 +43,15 @@ class MemoryProjectRepository implements ProjectRepository {
   }
 }
 
+const applications = [
+  {
+    id: "lazygit",
+    title: "LazyGit",
+    command: "exec lazygit",
+    actions: [],
+  },
+] as const satisfies readonly AppDefinition[];
+
 test("composes typed settings, static catalog, repository, and tmux runtime", async (context) => {
   const repository = new MemoryProjectRepository();
   const openedPaths: string[] = [];
@@ -47,6 +60,8 @@ test("composes typed settings, static catalog, repository, and tmux runtime", as
   let listenOptions: { readonly host: string; readonly port: number } | undefined;
 
   const dependencies: AgentServerDependencies = {
+    loadApplicationCatalog: async () =>
+      new StaticApplicationCatalog(applications),
     openProjectRepository: async (path) => {
       openedPaths.push(path);
       return repository;
@@ -73,7 +88,7 @@ test("composes typed settings, static catalog, repository, and tmux runtime", as
   const apps = await app.inject({ method: "GET", url: "/apps" });
   assert.deepEqual(
     apps.json().map((application: { id: string }) => application.id),
-    ["lazygit", "yazi", "pi"],
+    ["lazygit"],
   );
 
   await app.inject({

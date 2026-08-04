@@ -9,7 +9,10 @@ import { remoteDeckConfig, type RemoteDeckConfig } from "@remote-deck/config";
 import Fastify, { type FastifyInstance } from "fastify";
 
 import { createAgentApp } from "./app.js";
-import { createApplicationCatalog } from "./applications.js";
+import {
+  loadApplicationCatalog,
+  type ApplicationCatalog,
+} from "./applications.js";
 import {
   createJsonProjectRepository,
   type ProjectRepository,
@@ -31,6 +34,7 @@ const executeTmux: TmuxExecutor = async (arguments_) => {
 
 /** Injectable startup dependencies used by production and composition tests. */
 export interface AgentServerDependencies {
+  loadApplicationCatalog(): Promise<ApplicationCatalog>;
   openProjectRepository(path: string): Promise<ProjectRepository>;
   createProjectId(): string;
   executeTmux: TmuxExecutor;
@@ -41,6 +45,7 @@ export interface AgentServerDependencies {
 }
 
 const productionDependencies: AgentServerDependencies = {
+  loadApplicationCatalog,
   openProjectRepository: createJsonProjectRepository,
   createProjectId: randomUUID,
   executeTmux,
@@ -52,10 +57,10 @@ export async function startAgent(
   config: RemoteDeckConfig,
   dependencies: AgentServerDependencies = productionDependencies,
 ): Promise<FastifyInstance> {
+  const applicationCatalog = await dependencies.loadApplicationCatalog();
   const projectRepository = await dependencies.openProjectRepository(
     config.agent.projectStorePath,
   );
-  const applicationCatalog = createApplicationCatalog();
   const server = Fastify({ logger: { level: config.agent.logLevel } });
   const applicationRuntime = new TmuxApplicationRuntime(
     config.tmux,
