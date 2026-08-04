@@ -1,6 +1,6 @@
 /** Trusted settings bundled directly with the mobile application. */
 
-import { agentConnection, terminalDimensions } from "./shared.js";
+import { agentConnection, terminalDimensions } from "./shared.ts";
 import type { MobileConfig } from "./types.js";
 
 export type { MobileConfig, MobileTerminalConfig } from "./types.js";
