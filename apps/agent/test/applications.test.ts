@@ -113,7 +113,7 @@ test("discovers the built-in typed catalog in configured order", async () => {
   const catalog = await loadApplicationCatalog();
   assert.deepEqual(
     catalog.listApplications().map(({ id }) => id),
-    ["lazygit", "yazi", "pi"],
+    ["lazygit", "yazi", "pi", "package-scripts"],
   );
   assert.deepEqual(
     catalog.getApplication("lazygit")?.actions.map(({ id }) => id),
@@ -127,6 +127,14 @@ test("discovers the built-in typed catalog in configured order", async () => {
     required: true,
     maxLength: 256,
   });
+  assert.deepEqual(
+    catalog.getApplication("package-scripts")?.actions.map(({ id }) => id),
+    ["run", "cancel", "stop", "up", "down"],
+  );
+  assert.equal(
+    catalog.getApplication("package-scripts")?.command,
+    "exec nr",
+  );
   assert.equal("order" in (catalog.getApplication("lazygit") ?? {}), false);
 });
 
